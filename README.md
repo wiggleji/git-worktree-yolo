@@ -36,61 +36,92 @@ So you `git worktree add api-server-feature`, open it in your IDE, hit Run… an
 Works with Rails, Spring/Gradle, and Node repos. Runs on macOS (bash 3.2+) and Linux; needs
 `git` and `perl` (both standard).
 
-## Install
+## Install (one line)
 
-**As a project skill (shared with your whole team, zero per-developer install):**
+Installs the skill + the `/worktree-yolo-hook` command into `~/.claude`.
 
-```bash
-git clone https://github.com/wiggleji/git-worktree-yolo \
-  .claude/skills/git-worktree-yolo
-```
-Commit `.claude/skills/git-worktree-yolo/` — anyone who clones the repo gets the skill
-automatically (Claude Code auto-discovers `.claude/skills/`).
-
-**As a personal skill (all your projects):**
+**Default — skill only, no hook** (you trigger it, nothing touches your git config):
 
 ```bash
-git clone https://github.com/wiggleji/git-worktree-yolo \
-  ~/.claude/skills/git-worktree-yolo
+curl -fsSL https://raw.githubusercontent.com/wiggleji/git-worktree-yolo/main/install.sh | bash
 ```
+
+**With the global auto-sync hook** (every `git worktree add` on your machine self-heals):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wiggleji/git-worktree-yolo/main/install.sh | bash -s -- --with-hook
+```
+
+Re-running updates in place. Override the target with `CLAUDE_CONFIG_DIR=...`.
+
+<details><summary>Other install methods</summary>
+
+**Project skill (shared with your team, zero per-developer install)** — clone the `skills/`
+subtree into your repo and commit it:
+
+```bash
+git clone --depth 1 https://github.com/wiggleji/git-worktree-yolo /tmp/wty
+cp -R /tmp/wty/skills/git-worktree-yolo .claude/skills/git-worktree-yolo
+cp /tmp/wty/commands/worktree-yolo-hook.md .claude/commands/
+```
+Claude Code auto-discovers `.claude/skills/`, so anyone who clones the repo gets it.
+
+</details>
 
 ## Usage
 
 ```bash
-S=".claude/skills/git-worktree-yolo/git-worktree-yolo.sh"   # or the ~/.claude path
+S="$HOME/.claude/skills/git-worktree-yolo/git-worktree-yolo.sh"
 
-bash "$S" --dry-run [WORKTREE_DIR]   # preview (do this first on a new repo)
-bash "$S" [WORKTREE_DIR]             # sync current (or named) worktree — idempotent
-bash "$S" --install-hook             # one-time: every future 'git worktree add' self-heals
+bash "$S" --dry-run [WORKTREE_DIR]      # preview (do this first on a new repo)
+bash "$S" [WORKTREE_DIR]                # sync current (or named) worktree — idempotent
+bash "$S" --install-hook                # per-repo: this repo's 'git worktree add' self-heals
+bash "$S" --install-global-hook         # global: every repo on the machine self-heals
+bash "$S" --uninstall-global-hook       # turn the global hook back off
 ```
 
 Run from inside a worktree, or pass its path. In the main worktree it's a safe no-op.
 
-Inside Claude Code you can also just say *"sync my worktree"* and the skill is invoked.
+Inside Claude Code you can also just say *"sync my worktree"*, or use the toggle command:
+
+```
+/worktree-yolo-hook on      # enable global auto-sync hook
+/worktree-yolo-hook off     # disable it
+/worktree-yolo-hook         # toggle current state
+```
 
 ## Automatic invocation
 
-For hands-off self-healing on every agent/session start, wire it to a Claude Code hook
-(committed, no per-developer install) or a git `post-checkout` hook. See **[automation.md](automation.md)**.
+- **Global git hook** (above / `--with-hook` / `/worktree-yolo-hook on`) — fires on every
+  `git worktree add`, machine-wide, via `core.hooksPath`. Chains to your existing per-repo
+  `post-checkout` so nothing is lost. Reverse with `--uninstall-global-hook`.
+- **Per-repo or committed Claude Code hooks** — see **[automation.md](skills/git-worktree-yolo/automation.md)**
+  for `post-checkout` and `SessionStart`/`SubagentStart` recipes.
 
 ## Tuning
 
-The skip-list and size cap are arrays at the top of `git-worktree-yolo.sh`. Add project-specific
-dirs there, or override the cap: `WTSYNC_MAX_BYTES=2097152 bash git-worktree-yolo.sh`.
+The skip-list and size cap are arrays at the top of `skills/git-worktree-yolo/git-worktree-yolo.sh`.
+Add project-specific dirs there, or override the cap: `WTSYNC_MAX_BYTES=2097152 bash …`.
 
 ## Proof / tests
 
-`simulate.sh` builds a throwaway Rails-like repo, creates a worktree (which breaks), runs the
-sync, and asserts 18 invariants — sync, boundary-aware path rewrite, binary-verbatim copy,
-heavy-dir skip, `.iml` exclusion, **zero git diff**, and idempotency:
+Two isolated harnesses (they never touch your real repos or `~/.gitconfig`):
 
 ```bash
-bash simulate.sh        # → RESULT: 18 passed, 0 failed
+bash skills/git-worktree-yolo/simulate.sh         # core sync → RESULT: 18 passed, 0 failed
+bash skills/git-worktree-yolo/test-global-hook.sh # global hook → RESULT: 12 passed, 0 failed
 ```
+
+`simulate.sh` builds a throwaway Rails-like repo, creates a worktree (which breaks), runs the
+sync, and asserts sync, boundary-aware path rewrite, binary-verbatim copy, heavy-dir skip,
+`.iml` exclusion, **zero git diff**, and idempotency. `test-global-hook.sh` proves the global
+hook install/chain/uninstall in a sandboxed `HOME`.
 
 ## How it works (internals)
 
-See **[SKILL.md](SKILL.md)** for the skill contract and **[spec.md](spec.md)** for the design.
+See **[SKILL.md](skills/git-worktree-yolo/SKILL.md)** for the skill contract,
+**[automation.md](skills/git-worktree-yolo/automation.md)** for hook recipes, and
+**[spec.md](skills/git-worktree-yolo/spec.md)** for the design.
 
 ## License
 

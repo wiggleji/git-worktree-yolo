@@ -8,9 +8,12 @@
 # so it can never produce a `git status` diff (tracked or untracked).
 #
 # Usage:
-#   git-worktree-yolo.sh [TARGET_DIR]   # default: current worktree
-#   git-worktree-yolo.sh --install-hook # install shared post-checkout hook
-#   git-worktree-yolo.sh --dry-run [TARGET_DIR]
+#   git-worktree-yolo.sh [TARGET_DIR]          # sync current (or named) worktree
+#   git-worktree-yolo.sh --dry-run [TARGET_DIR]# preview only
+#   git-worktree-yolo.sh --quiet [TARGET_DIR]  # silent unless something is synced (for hooks)
+#   git-worktree-yolo.sh --install-hook        # per-repo post-checkout hook (this repo only)
+#   git-worktree-yolo.sh --install-global-hook # GLOBAL post-checkout hook (all repos, via core.hooksPath)
+#   git-worktree-yolo.sh --uninstall-global-hook
 #
 set -euo pipefail
 
@@ -34,22 +37,30 @@ SKIP_PATHS=( ".idea/modules.xml" )
 MAX_BYTES="${WTSYNC_MAX_BYTES:-1048576}"   # 1 MiB
 
 DRY_RUN=0
+QUIET=0
 ACTION="sync"
 TARGET_ARG=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --install-hook) ACTION="install-hook" ;;
-    --dry-run)      DRY_RUN=1 ;;
-    -h|--help)      grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *)              TARGET_ARG="$1" ;;
+    --install-hook)          ACTION="install-hook" ;;
+    --install-global-hook)   ACTION="install-global-hook" ;;
+    --uninstall-global-hook) ACTION="uninstall-global-hook" ;;
+    --dry-run)               DRY_RUN=1 ;;
+    --quiet|-q)              QUIET=1 ;;
+    -h|--help)               grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)                       TARGET_ARG="$1" ;;
   esac
   shift
 done
 
-log()  { printf '  %s\n' "$*" >&2; }
-info() { printf '\033[36m%s\033[0m\n' "$*" >&2; }
+# In --quiet mode info()/log() are suppressed; warnings always print.
+log()  { [[ "$QUIET" == 1 ]] && return 0; printf '  %s\n' "$*" >&2; }
+info() { [[ "$QUIET" == 1 ]] && return 0; printf '\033[36m%s\033[0m\n' "$*" >&2; }
 warn() { printf '\033[33mwarn:\033[0m %s\n' "$*" >&2; }
+
+# absolute path to this script (for baking into installed hooks)
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
 # --- resolver: origin (main worktree) + target (current worktree) ------------
 resolve_worktrees() {
@@ -153,9 +164,9 @@ do_sync() {
   resolve_worktrees
   if [[ "$ORIGIN" == "$TARGET" ]]; then
     info "In the main worktree ($TARGET) — nothing to sync."
-    exit 0
+    exit 0   # silent under --quiet (the common case when a hook fires on a normal checkout)
   fi
-  info "worktree-env-sync"
+  info "git-worktree-yolo"
   log "origin: $ORIGIN"
   log "target: $TARGET"
   SYNCED=(); REWRITTEN=(); SKIPPED=()
@@ -169,28 +180,104 @@ do_sync() {
       | LC_ALL=C sort -u
   )
 
-  info "done: ${#SYNCED[@]} synced, ${#REWRITTEN[@]} path-rewritten, heavy/oversized skipped"
+  # In quiet (hook) mode, emit a single line only if we actually synced something.
+  if [[ "$QUIET" == 1 ]]; then
+    [[ "${#SYNCED[@]}" -gt 0 ]] && \
+      printf '\033[36mgit-worktree-yolo:\033[0m synced %d file(s) into %s\n' "${#SYNCED[@]}" "$TARGET" >&2
+  else
+    info "done: ${#SYNCED[@]} synced, ${#REWRITTEN[@]} path-rewritten, heavy/oversized skipped"
+  fi
 }
 
-# --- hook installer ----------------------------------------------------------
+# --- shared: write a post-checkout hook into DIR --------------------------------
+# Preserves any pre-existing post-checkout (moved to .prev and chained).
+# $1 = hooks dir, $2 = 1 to also chain repo-local hooks bypassed by core.hooksPath.
+MARKER="# >>> git-worktree-yolo managed hook >>>"
+write_post_checkout_hook() {
+  local dir="$1" chain_repo_local="$2" hook="$dir/post-checkout"
+  mkdir -p "$dir"
+  if [[ -f "$hook" ]] && ! grep -qF "$MARKER" "$hook"; then
+    mv "$hook" "$hook.prev"
+    warn "existing post-checkout preserved as $hook.prev (it will still run, chained)"
+  fi
+  cat > "$hook" <<EOF
+#!/usr/bin/env bash
+$MARKER
+# Auto-heals a new git worktree's machine-local env. Safe no-op outside worktrees.
+# post-checkout args: \$1 prev-HEAD \$2 new-HEAD \$3 flag(1=branch/ref checkout)
+[ "\${3:-1}" = 1 ] && "$SELF" --quiet "\$PWD" || true
+# chain a previously-installed hook displaced by this one
+[ -x "$hook.prev" ] && "$hook.prev" "\$@"
+EOF
+  if [[ "$chain_repo_local" == 1 ]]; then
+    cat >> "$hook" <<'EOF'
+# chain the repo-local post-checkout that a global core.hooksPath would bypass
+__rl="$(git rev-parse --git-common-dir 2>/dev/null)/hooks/post-checkout"
+[ -x "$__rl" ] && [ ! "$__rl" -ef "$0" ] && "$__rl" "$@"
+EOF
+  fi
+  echo 'exit 0' >> "$hook"
+  chmod +x "$hook"
+}
+
+# --- per-repo hook (this repo's shared git dir only) ----------------------------
 install_hook() {
   resolve_worktrees
   local hookdir; hookdir="$(git -C "$TARGET" rev-parse --git-common-dir)/hooks"
   case "$hookdir" in /*) : ;; *) hookdir="$TARGET/$hookdir" ;; esac
-  mkdir -p "$hookdir"
-  local hook="$hookdir/post-checkout"
-  local self; self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-  cat > "$hook" <<EOF
-#!/usr/bin/env bash
-# installed by worktree-env-sync — self-heals machine-local files on checkout
-exec "$self" "\$PWD"
-EOF
-  chmod +x "$hook"
-  info "installed shared post-checkout hook: $hook"
-  log "every future 'git worktree add' will self-sync."
+  write_post_checkout_hook "$hookdir" 0
+  info "installed per-repo post-checkout hook: $hookdir/post-checkout"
+  log "every 'git worktree add' in THIS repo will self-sync."
+}
+
+# --- global hook (all repos on this machine, via core.hooksPath) ----------------
+install_global_hook() {
+  local dir existing
+  existing="$(git config --global core.hooksPath || true)"
+  if [[ -n "$existing" ]]; then
+    case "$existing" in "~"*) existing="$HOME${existing#\~}" ;; esac
+    dir="$existing"
+    info "core.hooksPath already set → installing into existing dir: $dir"
+  else
+    dir="${XDG_CONFIG_HOME:-$HOME/.config}/git/hooks"
+    write_post_checkout_hook "$dir" 1
+    git config --global core.hooksPath "$dir"
+    info "installed GLOBAL post-checkout hook: $dir/post-checkout"
+    warn "set global core.hooksPath=$dir — git now reads hooks from here for ALL repos."
+    warn "your hook chains to each repo's .git/hooks/post-checkout, but OTHER hook types"
+    warn "(pre-commit, etc.) in .git/hooks will no longer run unless copied here. Reverse with:"
+    warn "  $SELF --uninstall-global-hook"
+    log "every 'git worktree add' in ANY repo will now self-sync."
+    return 0
+  fi
+  write_post_checkout_hook "$dir" 1
+  info "installed GLOBAL post-checkout hook: $dir/post-checkout"
+  log "every 'git worktree add' in ANY repo will now self-sync."
+}
+
+uninstall_global_hook() {
+  local dir; dir="$(git config --global core.hooksPath || true)"
+  [[ -z "$dir" ]] && { info "no global core.hooksPath set — nothing to uninstall."; exit 0; }
+  case "$dir" in "~"*) dir="$HOME${dir#\~}" ;; esac
+  local hook="$dir/post-checkout"
+  if [[ -f "$hook" ]] && grep -qF "$MARKER" "$hook"; then
+    if [[ -f "$hook.prev" ]]; then mv "$hook.prev" "$hook"; info "restored previous hook: $hook"
+    else rm -f "$hook"; info "removed our hook: $hook"; fi
+  else
+    warn "post-checkout in $dir is not ours — leaving it untouched."
+  fi
+  # only unset core.hooksPath if WE were the one pointing it at our default dir
+  if [[ "$dir" == "${XDG_CONFIG_HOME:-$HOME/.config}/git/hooks" ]]; then
+    git config --global --unset core.hooksPath || true
+    info "unset global core.hooksPath."
+  else
+    warn "left core.hooksPath=$dir as-is (it predates this tool)."
+  fi
 }
 
 case "$ACTION" in
-  install-hook) install_hook ;;
-  sync)         do_sync ;;
+  install-hook)          install_hook ;;
+  install-global-hook)   install_global_hook ;;
+  uninstall-global-hook) uninstall_global_hook ;;
+  sync)                  do_sync ;;
 esac

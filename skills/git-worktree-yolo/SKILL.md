@@ -34,22 +34,26 @@ S="$HOME/.claude/skills/git-worktree-yolo/git-worktree-yolo.sh"
 
 bash "$S" --dry-run [WORKTREE_DIR]   # preview (do this first on a new repo)
 bash "$S" [WORKTREE_DIR]             # sync current (or named) worktree — idempotent
-bash "$S" --install-hook             # one-time: every future worktree self-heals (git post-checkout)
+bash "$S" --install-hook             # per-repo post-checkout hook (this repo only)
+bash "$S" --install-global-hook      # global hook: every repo on the machine self-heals
+bash "$S" --uninstall-global-hook    # turn the global hook off
 ```
 
 Run from inside the worktree, or pass its path. Running in the main worktree is a safe no-op.
+The toggle command `/worktree-yolo-hook [on|off]` wraps the global hook install/uninstall.
 
 ## Automatic invocation (no agent decision needed)
 
 The skill is *available* once committed to a repo (`.claude/skills/git-worktree-yolo/`), but
 availability ≠ auto-run. For true hands-off behavior, trigger the script from a hook so every
-session/worktree self-heals:
+worktree self-heals:
 
-- **Per-developer, universal:** `bash "$S" --install-hook` wires a shared git `post-checkout`
-  hook → fires on every `git worktree add` (any tool, including Claude's worktree creation).
-  One-time per clone (git does not clone `.git/hooks`).
-- **Team-wide, zero-install:** a committed `.claude/settings.json` hook that runs the script
-  on session start in a worktree (shared on clone). See `automation.md` for the exact config.
+- **Global git hook (recommended, install once):** `bash "$S" --install-global-hook` (or
+  `/worktree-yolo-hook on`) sets `core.hooksPath` so every `git worktree add` in any repo
+  self-syncs. Chains to existing per-repo `post-checkout` hooks.
+- **Per-repo:** `bash "$S" --install-hook` wires the hook into just this repo's shared git dir.
+- **Team-wide, zero-install:** a committed `.claude/settings.json` `SessionStart`/`SubagentStart`
+  hook (shared on clone). See `automation.md` for the exact config and trade-offs.
 
 ## How It Works
 

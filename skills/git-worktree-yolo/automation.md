@@ -6,7 +6,24 @@ not to be invoked by hand. Pick the trigger that fits how worktrees are created 
 The script is **idempotent** — running it on an already-synced worktree is a no-op — so it is
 safe to fire on every session start (even on resume/compact).
 
-## Option A — Claude Code hook (team-wide, zero per-developer install) ✅ recommended
+## Option 0 — global git hook (simplest, install once per machine) ✅ easiest
+
+```bash
+bash ~/.claude/skills/git-worktree-yolo/git-worktree-yolo.sh --install-global-hook
+# or, in Claude Code:  /worktree-yolo-hook on
+```
+
+Sets `git config --global core.hooksPath` so a `post-checkout` hook fires on **every
+`git worktree add` in every repo** on your machine — independent of Claude, IDEs, or how the
+worktree is created. The installed hook only acts inside a linked worktree (safe no-op on
+ordinary checkouts) and **chains to each repo's existing `post-checkout`** so nothing is lost.
+
+Trade-off: `core.hooksPath` makes git read hooks from one dir for all repos; other per-repo
+hook *types* (`pre-commit`, …) won't run via the default path unless copied there. Turn it off
+anytime with `--uninstall-global-hook` (or `/worktree-yolo-hook off`), which also restores any
+displaced hook. This is what `install.sh --with-hook` enables.
+
+## Option A — Claude Code hook (team-wide, zero per-developer install)
 
 Hooks committed in `.claude/settings.json` are shared with everyone who clones the repo — no
 `core.hooksPath` opt-in, unlike git's `.git/hooks`. A `SessionStart` hook fires for every
