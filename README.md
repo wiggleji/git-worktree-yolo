@@ -1,5 +1,7 @@
 # git-worktree-yolo
 
+[![CI](https://github.com/wiggleji/git-worktree-yolo/actions/workflows/ci.yml/badge.svg)](https://github.com/wiggleji/git-worktree-yolo/actions/workflows/ci.yml)
+
 > **YOLO — You Only Load Once.** Enter a git worktree, run it once, and its environment is
 > healed. Re-runs are free no-ops, so it's safe to fire automatically on every agent/session start.
 
@@ -226,7 +228,8 @@ Add project-specific dirs there, or override the cap: `WTSYNC_MAX_BYTES=2097152 
 
 ## Proof / tests
 
-Six isolated harnesses (they never touch your real repos or `~/.gitconfig`) — **84 assertions**:
+Six isolated harnesses (they never touch your real repos or `~/.gitconfig`) — **84 assertions**,
+run in [CI](.github/workflows/ci.yml) on Linux (bash 5.x) and macOS (bash 3.2) plus `shellcheck`:
 
 ```bash
 bash skills/git-worktree-yolo/simulate.sh          # core sync/rewrite/skip/zero-diff   → 18 passed

@@ -578,7 +578,7 @@ preserve_existing() {   # move a pre-existing, non-managed hook aside so we can 
 }
 # post-checkout: auto-sync a new worktree.  $1=dir  $2=1 to chain repo-local hook
 write_post_checkout_hook() {
-  local dir="$1" chain="$2" hook="$dir/post-checkout"
+  local dir="$1" chain="$2"; local hook="$dir/post-checkout"
   mkdir -p "$dir"; preserve_existing "$hook"
   cat > "$hook" <<EOF
 #!/usr/bin/env bash
@@ -595,7 +595,7 @@ EOF
 }
 # pre-commit: BLOCK committing secrets.  $1=dir  $2=1 to chain repo-local hook
 write_pre_commit_hook() {
-  local dir="$1" chain="$2" hook="$dir/pre-commit"
+  local dir="$1" chain="$2"; local hook="$dir/pre-commit"
   mkdir -p "$dir"; preserve_existing "$hook"
   cat > "$hook" <<EOF
 #!/usr/bin/env bash
