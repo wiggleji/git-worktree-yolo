@@ -137,7 +137,12 @@ bash "$D/test-global-hook.sh"   # global core.hooksPath install/chain/uninstall 
 bash "$D/test-multistack.sh"    # stack+IDE detection, report, manifest, --bootstrap → 19 passed
 bash "$D/test-secret-guard.sh"  # secret audit, pre-commit block, allow-list → 15 passed
 bash "$D/test-advisory.sh"      # heads-up for issues it can't auto-fix → 5 passed
+bash "$D/test-concurrency.sh"   # atomic writes + per-worktree lock + parallel safety → 15 passed
 ```
+
+Concurrency-safe by design: each file is written to a temp and atomically renamed (no
+half-written secrets), and a portable mkdir-based per-worktree lock serializes concurrent syncs
+of the same worktree (parallel agents / hook + manual run); a stale lock from a dead PID is stolen.
 
 ## Heads-up: issues it can't auto-fix
 

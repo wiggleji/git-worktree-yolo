@@ -131,6 +131,9 @@ So you `git worktree add api-server-feature`, open it in your IDE, hit Run… an
    JetBrains/IDE remote interpreter bound to the origin path (a common Docker-Compose-in-worktree
    failure), tracked files that hardcode the origin path, or symlinks into the origin checkout.
    It surfaces these as a ⚠ heads-up with the fix, rather than silently mis-"fixing" them.
+8. **Concurrency-safe.** Built for parallel agents: each file is written atomically (temp + rename,
+   so a reader or a crash never sees a half-written secret), and a portable per-worktree lock
+   serializes concurrent syncs of the same worktree (hook + manual run) — second one skips cleanly.
 
 ```
 git-worktree-yolo · api-server-feature
@@ -223,7 +226,7 @@ Add project-specific dirs there, or override the cap: `WTSYNC_MAX_BYTES=2097152 
 
 ## Proof / tests
 
-Five isolated harnesses (they never touch your real repos or `~/.gitconfig`) — **69 assertions**:
+Six isolated harnesses (they never touch your real repos or `~/.gitconfig`) — **84 assertions**:
 
 ```bash
 bash skills/git-worktree-yolo/simulate.sh          # core sync/rewrite/skip/zero-diff   → 18 passed
@@ -231,6 +234,7 @@ bash skills/git-worktree-yolo/test-global-hook.sh  # global core.hooksPath hook 
 bash skills/git-worktree-yolo/test-multistack.sh   # stack/IDE detection, manifest, bootstrap → 19 passed
 bash skills/git-worktree-yolo/test-secret-guard.sh # audit, pre-commit block, allow-list → 15 passed
 bash skills/git-worktree-yolo/test-advisory.sh     # heads-up for unfixable issues       →  5 passed
+bash skills/git-worktree-yolo/test-concurrency.sh  # atomic writes, lock, parallel safety → 15 passed
 ```
 
 `simulate.sh` asserts sync, boundary-aware path rewrite, binary-verbatim copy, heavy-dir skip,

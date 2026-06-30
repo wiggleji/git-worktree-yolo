@@ -120,6 +120,33 @@ crit() { printf '\033[1;31m‼ SECRET:\033[0m %s\n' "$*" >&2; }   # always shown
 # absolute path to this script (for baking into installed hooks)
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
+# --- concurrency & atomicity --------------------------------------------------
+# The tool exists for PARALLEL agents creating worktrees. Two syncs of the SAME
+# worktree (e.g. the post-checkout hook + a manual run) must not race or leave a
+# half-written .env. We guard with a portable per-target lock and atomic writes.
+WTY_TMPS=(); LOCK_HELD=0; LOCKDIR=""
+cleanup_tmps() { local t; for t in ${WTY_TMPS[@]+"${WTY_TMPS[@]}"}; do [[ -e "$t" ]] && rm -f "$t"; done; return 0; }
+release_lock() { [[ "${LOCK_HELD:-0}" == 1 ]] && rm -rf "$LOCKDIR" 2>/dev/null; LOCK_HELD=0; return 0; }
+# end on `:` so a clean exit stays 0 (an EXIT trap's last status becomes the script's exit code).
+trap 'release_lock; cleanup_tmps; :' EXIT INT TERM
+
+# mkdir(2) is atomic on POSIX → a dependency-free mutex (no flock, which macOS lacks).
+# Steals a stale lock whose owner PID is dead. Returns 1 if another live sync holds it.
+acquire_lock() {
+  local key="$1" tries=0 pid
+  LOCKDIR="${TMPDIR:-/tmp}/git-worktree-yolo-$(printf '%s' "$key" | tr '/ ' '__').lock"
+  while ! mkdir "$LOCKDIR" 2>/dev/null; do
+    pid="$(cat "$LOCKDIR/pid" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+      rm -rf "$LOCKDIR" 2>/dev/null || true; continue   # stale lock → steal it
+    fi
+    tries=$((tries + 1))
+    [[ "$tries" -ge 25 ]] && { log "another git-worktree-yolo is already syncing this worktree — skipping."; return 1; }
+    sleep 0.2
+  done
+  echo "$$" > "$LOCKDIR/pid"; LOCK_HELD=1; return 0
+}
+
 # --- resolver: origin (main worktree) + target (current worktree) ------------
 resolve_worktrees() {
   local start="${TARGET_ARG:-$PWD}"
@@ -236,18 +263,25 @@ sync_file() {
   fi
 
   mkdir -p "$(dirname "$dst")"
-  cp -p "$src" "$dst"
+  # ATOMIC: copy + rewrite on a temp in the SAME dir, then rename. A reader (or a crash)
+  # never sees a half-written secret — it sees the old file or the complete new one.
+  # $$ makes the temp unique per process; the per-target lock serializes same-worktree syncs.
+  local tmp="${dst}.wty-tmp.$$"
+  WTY_TMPS+=("$tmp")
+  cp -p "$src" "$tmp"
 
   # rewrite baked-in origin path -> target path, text files only.
   # Boundary-aware: only rewrite ORIGIN when followed by /, quote, space, :, ), > or EOL,
   # so it never corrupts a path that is already the longer worktree form
   # (origin "api-server" is a prefix of worktree "api-server-outbox"). \Q..\E quotes metachars.
-  if grep -Iq . "$dst" 2>/dev/null && grep -qF "$ORIGIN" "$dst" 2>/dev/null; then
+  if grep -Iq . "$tmp" 2>/dev/null && grep -qF "$ORIGIN" "$tmp" 2>/dev/null; then
     ORIG="$ORIGIN" TGT="$TARGET" perl -i -pe \
-      's/\Q$ENV{ORIG}\E(?=\/|["'"'"' :\)>]|$)/$ENV{TGT}/g' "$dst"
+      's/\Q$ENV{ORIG}\E(?=\/|["'"'"' :\)>]|$)/$ENV{TGT}/g' "$tmp"
+    mv -f "$tmp" "$dst"
     log "synced + path-rewritten: $rel"
     REWRITTEN+=("$rel")
   else
+    mv -f "$tmp" "$dst"
     log "synced: $rel"
   fi
   SYNCED+=("$rel")
@@ -451,6 +485,9 @@ do_sync() {
     info "In the main worktree ($TARGET) — nothing to sync."
     exit 0   # silent under --quiet (the common case when a hook fires on a normal checkout)
   fi
+  # serialize concurrent syncs of THIS worktree (parallel agents / hook + manual run).
+  # If another sync holds the lock, it's already doing this work → skip (benign no-op).
+  acquire_lock "$TARGET" || exit 0
   load_config
   detect_stacks
   local stacks_str ides_str
