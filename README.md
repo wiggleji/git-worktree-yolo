@@ -123,6 +123,33 @@ Claude Code auto-discovers `.claude/skills/`, so anyone who clones the repo gets
 
 </details>
 
+## Works across agents (Claude Code · OpenAI Codex · Google Antigravity)
+
+The engine is **agent-agnostic** — a bash script + git hooks. The git `post-checkout`/`pre-commit`
+hooks fire on `git worktree add` / `git commit` no matter which agent (or none) you use, so the
+full behavior works everywhere via `--with-hook` / `--with-guard`. Only the skill *discovery* and
+the slash-command wrapper differ; `install.sh` handles all three (target one with `--agent`):
+
+| Agent | Skill location (installed) | Slash command | Instructions file |
+|---|---|---|---|
+| **Claude Code** | `~/.claude/skills/git-worktree-yolo/` | `/worktree-yolo-hook` (`~/.claude/commands/`) | `CLAUDE.md` |
+| **OpenAI Codex** | `~/.agents/skills/git-worktree-yolo/` *(open standard)* | invoke via `$git-worktree-yolo` / `/skills` | `AGENTS.md` |
+| **Google Antigravity** | `~/.agents/skills/git-worktree-yolo/` (IDE) | `/worktree-yolo-hook` workflow (`~/.gemini/antigravity/global_workflows/`) | `GEMINI.md` + `.agent/rules/` |
+
+`~/.agents/skills/` and [`AGENTS.md`](AGENTS.md) are shared cross-agent standards, so a single
+`SKILL.md` is read by Codex and Antigravity alike. Notes:
+- **Codex** has a hook system (`~/.codex/hooks.json`) but no "entered a worktree" event — so the
+  git `post-checkout` hook remains the right layer; optionally add a `SessionStart` hook to also
+  sync when a Codex session opens in an existing worktree.
+- **Antigravity** has no confirmed event-hook mechanism — rely on the git hook, and the shipped
+  skill/workflow give on-request invocation. Add a one-line `.agent/rules/` entry pointing agents
+  to run it on entering a worktree.
+- Add a one-line `GEMINI.md`/`CLAUDE.md` pointing at `AGENTS.md` so every agent shares one source.
+
+```bash
+curl -fsSL …/install.sh | bash -s -- --agent codex        # or: claude | antigravity | all
+```
+
 ## Usage
 
 ```bash
