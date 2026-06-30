@@ -32,9 +32,35 @@ So you `git worktree add api-server-feature`, open it in your IDE, hit Run… an
    name-specific — copying them would *break* the worktree's project structure.
 5. **Safety invariant:** every file it writes must be gitignored in the target
    (verified with `git check-ignore`), so it can never create a `git status` diff.
+6. **Detects the stack(s) + IDE(s)** and prints a report: what was synced and which dependency
+   bootstrap the worktree still needs (`npm ci`, `pod install`, `pip install`, …) — or runs
+   them with `--bootstrap`.
 
-Works with Rails, Spring/Gradle, and Node repos. Runs on macOS (bash 3.2+) and Linux; needs
-`git` and `perl` (both standard).
+```
+git-worktree-yolo · api-server-feature
+  stack:  Rails · Node(npm) · iOS
+  IDE:    JetBrains · VSCode
+  done: 8 synced, 2 path-rewritten, heavy/oversized skipped
+  next steps — this worktree still needs dependencies installed:
+      npm ci         # node_modules (npm)
+      pod install    # Pods (CocoaPods)
+```
+
+### Supported stacks & IDEs
+
+| Layer | Detected / handled |
+|---|---|
+| **Server** | Ruby/Rails (`master.key`, credentials), Python (`.venv` recreate), Node, Go, Java/Kotlin (Gradle/Maven), .NET, PHP/Laravel |
+| **Web** | JS/TS — Next, Vite, CRA, Nuxt, SvelteKit, Angular (`.env*`, `.npmrc`) |
+| **Mobile** | iOS/CocoaPods (`*.xcconfig`, `Pods` recreate), Android/Gradle (`local.properties` `sdk.dir`, `keystore.properties`, `*.jks`/`*.keystore`), React Native, Flutter (`.dart_tool`) |
+| **IDE env** | JetBrains (`.idea`), VSCode (`.vscode`), Fleet, Zed, Nova, Xcode |
+| **Secrets** | `*.key`, `*.jks`/`*.keystore`/`*.p12`, `google-services.json`, `GoogleService-Info.plist` (when gitignored, copied verbatim) |
+
+Globally-cached ecosystems (Gradle `~/.gradle`, Maven `~/.m2`, Go `~/go`, NuGet) aren't nagged for
+re-install — a worktree shares those caches. Teams tune everything via a committed
+**[`.worktree-yolo`](.worktree-yolo.example)** manifest (`sync` / `skip` / `recreate` directives).
+
+Runs on macOS (bash 3.2+) and Linux; needs `git` and `perl` (both standard).
 
 ## Install (one line)
 
@@ -74,7 +100,8 @@ Claude Code auto-discovers `.claude/skills/`, so anyone who clones the repo gets
 S="$HOME/.claude/skills/git-worktree-yolo/git-worktree-yolo.sh"
 
 bash "$S" --dry-run [WORKTREE_DIR]      # preview (do this first on a new repo)
-bash "$S" [WORKTREE_DIR]                # sync current (or named) worktree — idempotent
+bash "$S" [WORKTREE_DIR]                # sync + report stack/IDE/next-steps — idempotent
+bash "$S" --bootstrap [WORKTREE_DIR]    # also RUN the dep installs (npm ci / pod install / …)
 bash "$S" --install-hook                # per-repo: this repo's 'git worktree add' self-heals
 bash "$S" --install-global-hook         # global: every repo on the machine self-heals
 bash "$S" --uninstall-global-hook       # turn the global hook back off
@@ -105,17 +132,19 @@ Add project-specific dirs there, or override the cap: `WTSYNC_MAX_BYTES=2097152 
 
 ## Proof / tests
 
-Two isolated harnesses (they never touch your real repos or `~/.gitconfig`):
+Three isolated harnesses (they never touch your real repos or `~/.gitconfig`) — 49 assertions:
 
 ```bash
-bash skills/git-worktree-yolo/simulate.sh         # core sync → RESULT: 18 passed, 0 failed
-bash skills/git-worktree-yolo/test-global-hook.sh # global hook → RESULT: 12 passed, 0 failed
+bash skills/git-worktree-yolo/simulate.sh         # core sync/rewrite/skip/zero-diff → 18 passed
+bash skills/git-worktree-yolo/test-global-hook.sh # global core.hooksPath hook        → 12 passed
+bash skills/git-worktree-yolo/test-multistack.sh  # stack/IDE detection, manifest, --bootstrap → 19 passed
 ```
 
-`simulate.sh` builds a throwaway Rails-like repo, creates a worktree (which breaks), runs the
-sync, and asserts sync, boundary-aware path rewrite, binary-verbatim copy, heavy-dir skip,
-`.iml` exclusion, **zero git diff**, and idempotency. `test-global-hook.sh` proves the global
-hook install/chain/uninstall in a sandboxed `HOME`.
+`simulate.sh` builds a throwaway repo, creates a worktree (which breaks), and asserts sync,
+boundary-aware path rewrite, binary-verbatim copy, heavy-dir skip, `.iml` exclusion, **zero git
+diff**, and idempotency. `test-global-hook.sh` proves the global hook install/chain/uninstall in
+a sandboxed `HOME`. `test-multistack.sh` proves stack/IDE detection, the report, recreate guidance,
+the `.worktree-yolo` manifest, and `--bootstrap`.
 
 ## How it works (internals)
 

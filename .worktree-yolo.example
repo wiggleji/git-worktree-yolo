@@ -1,0 +1,18 @@
+# .worktree-yolo — per-repo manifest for git-worktree-yolo (commit this at your repo root)
+#
+# Extends the built-in defaults. One directive per line; '#' starts a comment.
+# git-worktree-yolo already syncs gitignored machine-local config (.env, keys, IDE run
+# configs, Android local.properties, *.xcconfig, keystores) and skips heavy/regenerable
+# dirs (node_modules, .venv, Pods, target, .gradle, build, dist, …). Use this file only
+# for project-specific cases the defaults miss.
+
+# force-sync a gitignored file the skip-list would otherwise drop
+# (e.g. a secret living inside a normally-skipped dir):
+# sync  config/credentials/staging.key
+
+# never sync a particular gitignored path:
+# skip  db/seeds/local-dump.sql
+
+# custom "if this dir is missing in the worktree, suggest this command":
+# recreate  node_modules  -- pnpm install --frozen-lockfile
+# recreate  .venv         -- uv sync

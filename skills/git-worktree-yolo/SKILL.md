@@ -1,6 +1,6 @@
 ---
 name: git-worktree-yolo
-description: Use when a git worktree won't run, compile, or debug because machine-local files are missing or paths are wrong — symptoms like ".env missing in the worktree", "DB won't connect in api-server-feature", "JetBrains/VSCode run config broken after git worktree add", or absolute paths still pointing at the origin checkout. Also use when starting work (as an agent or human) inside any non-main git worktree, to self-heal its environment first. For Rails/Spring/Node repos where the origin dir name is baked into worktree siblings.
+description: Use when a git worktree won't run, compile, or debug because machine-local files are missing or paths are wrong — symptoms like ".env missing in the worktree", "DB won't connect in api-server-feature", "JetBrains/VSCode run config broken after git worktree add", or absolute paths still pointing at the origin checkout. Also use when starting work (as an agent or human) inside any non-main git worktree, to self-heal its environment and see which stack/IDE/dependencies it needs before proceeding. Multi-stack: server (Ruby/Rails, Python, Node, Go, Java/Kotlin, .NET, PHP), web (JS/TS), and mobile (iOS, Android, React Native, Flutter).
 ---
 
 # git-worktree-yolo
@@ -18,7 +18,17 @@ worktree then can't connect to a DB, run, or debug.
 
 `git-worktree-yolo.sh` mirrors those files from the **origin (main) worktree** into the current
 worktree and rewrites any baked-in origin path to the worktree's path — touching **only
-gitignored files**, so it can never create a `git status` diff.
+gitignored files**, so it can never create a `git status` diff. It then **detects the repo's
+stack(s) and IDE(s)** and reports what was synced and which dependency bootstrap the worktree
+still needs (`npm ci`, `pod install`, `pip install`, …) — optionally running them with `--bootstrap`.
+
+Supports server (Ruby/Rails, Python, Node, Go, Java/Kotlin, .NET, PHP), web (JS/TS: Next, Vite,
+CRA, Nuxt, Svelte), and mobile (iOS/CocoaPods, Android/Gradle, React Native, Flutter); IDEs:
+JetBrains, VSCode, Fleet, Zed, Nova, Xcode. Per-repo tuning via a committed `.worktree-yolo` manifest.
+
+**Surface the report to the user.** When you (an agent) run this on entering a worktree, show
+the user the printed stack/IDE/synced/next-steps summary before proceeding — it tells them what
+environment the worktree has and what they must install.
 
 ## When to Use
 
@@ -33,7 +43,8 @@ gitignored files**, so it can never create a `git status` diff.
 S="$HOME/.claude/skills/git-worktree-yolo/git-worktree-yolo.sh"
 
 bash "$S" --dry-run [WORKTREE_DIR]   # preview (do this first on a new repo)
-bash "$S" [WORKTREE_DIR]             # sync current (or named) worktree — idempotent
+bash "$S" [WORKTREE_DIR]             # sync + report stack/IDE/next-steps — idempotent
+bash "$S" --bootstrap [WORKTREE_DIR] # also RUN the dep installs (npm ci / pod install / …)
 bash "$S" --install-hook             # per-repo post-checkout hook (this repo only)
 bash "$S" --install-global-hook      # global hook: every repo on the machine self-heals
 bash "$S" --uninstall-global-hook    # turn the global hook off
@@ -41,6 +52,18 @@ bash "$S" --uninstall-global-hook    # turn the global hook off
 
 Run from inside the worktree, or pass its path. Running in the main worktree is a safe no-op.
 The toggle command `/worktree-yolo-hook [on|off]` wraps the global hook install/uninstall.
+
+The report looks like:
+
+```
+git-worktree-yolo · api-server-feature
+  stack:  Rails · Node(npm) · iOS
+  IDE:    JetBrains · VSCode
+  done: 8 synced, 2 path-rewritten, heavy/oversized skipped
+  next steps — this worktree still needs dependencies installed:
+      npm ci         # node_modules (npm)
+      pod install    # Pods (CocoaPods)
+```
 
 ## Automatic invocation (no agent decision needed)
 
@@ -69,6 +92,19 @@ isn't corrupted inside `…/api-server-outbox` (binaries copied verbatim).
 guaranteeing zero git diff. Tune the skip-list/size-cap arrays atop the script, or override
 with `WTSYNC_MAX_BYTES`.
 
+After syncing it detects per-repo dependency dirs that don't carry over (`node_modules`, `.venv`,
+`Pods`, `vendor`, `.dart_tool`) and prints the right recreate command (lockfile-aware:
+npm/yarn/pnpm, pip/poetry/uv, …). Globally-cached ecosystems (Gradle `~/.gradle`, Maven `~/.m2`,
+Go `~/go`, NuGet) are *not* nagged — a worktree shares those caches.
+
+**`.worktree-yolo` manifest** (committed at repo root) extends the defaults:
+
+```
+sync     config/local-overrides.yml      # force-sync a path the skip-list would drop
+skip      data/fixtures                    # never sync this
+recreate  node_modules -- pnpm install     # custom "missing dir → command" hint
+```
+
 ## Common Mistakes
 
 - **`cp -r origin/* worktree/`** — clobbers tracked files and copies `node_modules`, producing
@@ -80,9 +116,11 @@ with `WTSYNC_MAX_BYTES`.
 
 ## Verification
 
-`simulate.sh` ships alongside this skill — it builds a throwaway repo and asserts sync,
-path-rewrite, binary-verbatim, heavy-dir skip, zero-diff, and idempotency:
+Three isolated harnesses ship alongside this skill (none touch real repos or `~/.gitconfig`):
 
 ```bash
-bash "$(dirname "$0")/simulate.sh"   # run from the skill dir; expects "RESULT: N passed, 0 failed"
+D="$(dirname "$0")"
+bash "$D/simulate.sh"          # core sync/rewrite/skip/zero-diff/idempotency → 18 passed
+bash "$D/test-global-hook.sh"  # global core.hooksPath install/chain/uninstall → 12 passed
+bash "$D/test-multistack.sh"   # stack+IDE detection, report, manifest, --bootstrap → 19 passed
 ```

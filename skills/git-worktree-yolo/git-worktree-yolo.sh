@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 #
-# git-worktree-yolo.sh — make a git worktree IDE-runnable by mirroring machine-local
-# (gitignored) files from the origin worktree and rewriting baked-in origin paths.
+# git-worktree-yolo.sh — make a git worktree runnable/debuggable by mirroring machine-local
+# (gitignored) files from the origin worktree and rewriting baked-in origin paths, then
+# guiding (or running) the dependency bootstrap the new worktree needs.
 # Idempotent: safe to run repeatedly; a synced worktree is a no-op ("you only load once").
+#
+# Multi-stack: server (Ruby/Python/Node/Go/Java-Kotlin/.NET/PHP), web (JS/TS), and
+# mobile (iOS/CocoaPods, Android/Gradle, React Native, Flutter). Per-repo tuning via a
+# committed `.worktree-yolo` manifest (sync/skip/recreate directives).
 #
 # Safety invariant: only ever writes paths that are gitignored in the TARGET worktree,
 # so it can never produce a `git status` diff (tracked or untracked).
@@ -10,6 +15,7 @@
 # Usage:
 #   git-worktree-yolo.sh [TARGET_DIR]          # sync current (or named) worktree
 #   git-worktree-yolo.sh --dry-run [TARGET_DIR]# preview only
+#   git-worktree-yolo.sh --bootstrap [TARGET_DIR] # also RUN the dep install commands
 #   git-worktree-yolo.sh --quiet [TARGET_DIR]  # silent unless something is synced (for hooks)
 #   git-worktree-yolo.sh --install-hook        # per-repo post-checkout hook (this repo only)
 #   git-worktree-yolo.sh --install-global-hook # GLOBAL post-checkout hook (all repos, via core.hooksPath)
@@ -19,25 +25,47 @@ set -euo pipefail
 
 # --- config: heavy / regenerable paths never worth syncing -------------------
 # Heavy / regenerable / generated-output dirs — never synced (path-prefix match).
+# We only ever sync GITIGNORED files, so tracked dirs of the same name are unaffected.
 SKIP_DIRS=(
-  node_modules tmp log logs coverage vendor .bundle .yarn .pnpm-store
-  dist build target .gradle .next out storage public
-  .git .idea/shelf
-  .claude/worktrees   # nested git worktrees — never recurse-copy these
+  # JS / TS / web
+  node_modules .pnpm-store .yarn bower_components
+  .next .nuxt .svelte-kit .turbo .vite .parcel-cache .cache .angular
+  # build output / general
+  dist build out target dist-ssr coverage .nyc_output
+  # Ruby
+  vendor .bundle
+  # Python
+  .venv venv .tox __pycache__ .pytest_cache .mypy_cache .ruff_cache
+  # JVM (Gradle/Maven) + .NET
+  .gradle bin obj
+  # iOS / macOS
+  Pods Carthage DerivedData
+  # Flutter / Dart
+  .dart_tool
+  # logs / scratch / generated exports
+  tmp log logs storage public
+  # vcs / editor / nested worktrees
+  .git .idea/shelf .claude/worktrees
 )
 # Generated/junk files — never synced (basename glob match).
 # *.iml: JetBrains module files are per-worktree and name-specific (the worktree
 # auto-generates its own, e.g. api-server-outbox.iml) — copying origin's would
 # corrupt the worktree's project structure.
-SKIP_NAMES=( ".DS_Store" "*.log" "*.pid" "*.sock" "*.iml" )
+SKIP_NAMES=( ".DS_Store" "*.log" "*.pid" "*.sock" "*.iml" "*.xcuserstate" )
 # Exact rel-path skips — JetBrains module index, tied to the *.iml above.
 SKIP_PATHS=( ".idea/modules.xml" )
 # Size cap: machine-local config is tiny; anything larger is treated as a data
 # artifact and skipped. Override with WTSYNC_MAX_BYTES.
 MAX_BYTES="${WTSYNC_MAX_BYTES:-1048576}"   # 1 MiB
 
+# Per-repo manifest (committed at repo root). Populated by load_config().
+CONFIG_SYNC=()      # globs to force-include even if the skip-list would drop them
+CONFIG_SKIP=()      # extra paths/globs to skip
+CONFIG_RECREATE=()  # "depdir|||command" entries; emitted if depdir missing in target
+
 DRY_RUN=0
 QUIET=0
+BOOTSTRAP=0
 ACTION="sync"
 TARGET_ARG=""
 
@@ -47,6 +75,7 @@ while [[ $# -gt 0 ]]; do
     --install-global-hook)   ACTION="install-global-hook" ;;
     --uninstall-global-hook) ACTION="uninstall-global-hook" ;;
     --dry-run)               DRY_RUN=1 ;;
+    --bootstrap)             BOOTSTRAP=1 ;;
     --quiet|-q)              QUIET=1 ;;
     -h|--help)               grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)                       TARGET_ARG="$1" ;;
@@ -79,7 +108,17 @@ target_ignored() { git -C "$TARGET" check-ignore -q "$1"; }
 
 # --- should REL be skipped (heavy/regenerable dir, or junk basename)? --------
 is_skipped() {
-  local rel="$1" base="${1##*/}" s n p
+  local rel="$1" base="${1##*/}" s n p g
+  # manifest force-include wins over every skip rule (still must be gitignored to be written)
+  # (bash 3.2 + set -u: guard empty-array expansion with the ${arr[@]+"..."} idiom)
+  for g in ${CONFIG_SYNC[@]+"${CONFIG_SYNC[@]}"}; do
+    # shellcheck disable=SC2053
+    [[ "$rel" == $g || "$base" == $g ]] && return 1
+  done
+  for g in ${CONFIG_SKIP[@]+"${CONFIG_SKIP[@]}"}; do
+    # shellcheck disable=SC2053
+    [[ "$rel" == "$g" || "$rel" == "$g/"* || "$base" == $g ]] && return 0
+  done
   for s in "${SKIP_DIRS[@]}"; do
     [[ "$rel" == "$s" || "$rel" == "$s/"* ]] && return 0
   done
@@ -160,13 +199,155 @@ emit_candidate() {
   fi
 }
 
+# --- per-repo manifest: .worktree-yolo at repo root -----------------------------
+# Directives, one per line (blank lines and # comments ignored):
+#   sync   <glob>                  force-include a gitignored path the skip-list would drop
+#   skip   <path|glob>             never sync this path
+#   recreate <depdir> -- <command> if <depdir> is missing in the worktree, suggest <command>
+load_config() {
+  local f="$ORIGIN/.worktree-yolo"
+  [[ -f "$f" ]] || return 0
+  local kind rest dir cmd
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"                       # strip comments
+    line="${line#"${line%%[![:space:]]*}"}"  # ltrim
+    [[ -z "$line" ]] && continue
+    kind="${line%%[[:space:]]*}"
+    rest="${line#"$kind"}"; rest="${rest#"${rest%%[![:space:]]*}"}"  # ltrim remainder
+    case "$kind" in
+      sync) CONFIG_SYNC+=("$rest") ;;
+      skip) CONFIG_SKIP+=("$rest") ;;
+      recreate)
+        if [[ "$rest" == *" -- "* ]]; then
+          dir="${rest%% -- *}"; cmd="${rest#* -- }"
+          CONFIG_RECREATE+=("${dir}|||${cmd}")
+        fi ;;
+    esac
+  done < "$f"
+  [[ "${#CONFIG_SYNC[@]}${#CONFIG_SKIP[@]}${#CONFIG_RECREATE[@]}" != "000" ]] && \
+    log "loaded .worktree-yolo (${#CONFIG_SYNC[@]} sync, ${#CONFIG_SKIP[@]} skip, ${#CONFIG_RECREATE[@]} recreate)"
+}
+
+# --- detect which dependency bootstraps the worktree needs ----------------------
+# Focuses on PER-REPO dep dirs that don't carry over (node_modules, .venv, Pods, ...).
+# Globally-cached ecosystems (Gradle ~/.gradle, Maven ~/.m2, Go ~/go, NuGet) are NOT
+# nagged about — a worktree shares those caches and works without re-install.
+RECREATE=()
+have() { [[ -e "$TARGET/$1" ]]; }
+add_recreate() { RECREATE+=("$1|||$2"); }   # cmd ||| reason
+detect_recreate() {
+  local t="$TARGET"
+  # JS / TS  (lockfile picks the package manager)
+  if [[ -f "$t/package.json" ]] && ! have node_modules; then
+    if   [[ -f "$t/pnpm-lock.yaml" ]];   then add_recreate "pnpm install --frozen-lockfile" "node_modules (pnpm)"
+    elif [[ -f "$t/yarn.lock" ]];        then add_recreate "yarn install --frozen-lockfile" "node_modules (yarn)"
+    elif [[ -f "$t/package-lock.json" ]];then add_recreate "npm ci" "node_modules (npm)"
+    else add_recreate "npm install" "node_modules (npm)"; fi
+  fi
+  # Python
+  if [[ -f "$t/pyproject.toml" || -f "$t/requirements.txt" ]] && ! have .venv && ! have venv; then
+    if   [[ -f "$t/poetry.lock" ]]; then add_recreate "poetry install" ".venv (poetry)"
+    elif [[ -f "$t/uv.lock" ]];     then add_recreate "uv sync" ".venv (uv)"
+    elif [[ -f "$t/requirements.txt" ]]; then add_recreate "python3 -m venv .venv && .venv/bin/pip install -r requirements.txt" ".venv (pip)"
+    else add_recreate "python3 -m venv .venv && .venv/bin/pip install -e ." ".venv (pip)"; fi
+  fi
+  # PHP / Laravel
+  [[ -f "$t/composer.json" ]] && ! have vendor && add_recreate "composer install" "vendor (composer)"
+  # iOS / CocoaPods
+  [[ -f "$t/Podfile" ]] && ! have Pods && add_recreate "pod install" "Pods (CocoaPods)"
+  [[ -f "$t/ios/Podfile" ]] && ! have ios/Pods && add_recreate "(cd ios && pod install)" "ios/Pods (CocoaPods)"
+  # Flutter / Dart
+  [[ -f "$t/pubspec.yaml" ]] && ! have .dart_tool && add_recreate "flutter pub get" ".dart_tool (Flutter)"
+  # Ruby — only when bundler is configured to install into the repo (vendor/bundle)
+  if [[ -f "$t/Gemfile" && -f "$t/.bundle/config" ]] && grep -q 'BUNDLE_PATH' "$t/.bundle/config" 2>/dev/null && ! have vendor/bundle; then
+    add_recreate "bundle install" "vendor/bundle (bundler)"
+  fi
+  # manifest-declared extras
+  local e dir cmd
+  for e in ${CONFIG_RECREATE[@]+"${CONFIG_RECREATE[@]}"}; do
+    dir="${e%%|||*}"; cmd="${e#*|||}"
+    [[ -n "$dir" ]] && ! have "$dir" && add_recreate "$cmd" "$dir (.worktree-yolo)"
+  done
+}
+
+emit_recreate() {
+  [[ "${#RECREATE[@]}" -eq 0 ]] && return 0
+  local e cmd reason
+  if [[ "$BOOTSTRAP" == 1 ]]; then
+    printf '\033[36mgit-worktree-yolo:\033[0m bootstrapping %d dependency set(s)…\n' "${#RECREATE[@]}" >&2
+    for e in "${RECREATE[@]}"; do
+      cmd="${e%%|||*}"; reason="${e#*|||}"
+      printf '  → %s: %s\n' "$reason" "$cmd" >&2
+      ( cd "$TARGET" && eval "$cmd" ) || warn "bootstrap failed for $reason (continuing)"
+    done
+  elif [[ "$QUIET" == 1 ]]; then
+    # compact one-liner for hook output
+    local list=""
+    for e in "${RECREATE[@]}"; do list+="${list:+; }${e%%|||*}"; done
+    printf '\033[36mgit-worktree-yolo:\033[0m worktree still needs: \033[33m%s\033[0m\n' "$list" >&2
+  else
+    info "next steps — this worktree still needs dependencies installed:"
+    for e in "${RECREATE[@]}"; do
+      cmd="${e%%|||*}"; reason="${e#*|||}"
+      printf '    \033[33m%s\033[0m   # %s\n' "$cmd" "$reason" >&2
+    done
+    log "(re-run with --bootstrap to execute these automatically)"
+  fi
+}
+
+# --- detect stacks & IDEs for the in-session report ----------------------------
+STACKS=(); IDES=()
+join_by() { local sep="$1"; shift; local out="" x; for x in "$@"; do out+="${out:+$sep}$x"; done; printf '%s' "$out"; }
+detect_stacks() {
+  # detect against ORIGIN (fully-populated main worktree); gitignored markers like
+  # .idea/ and local.properties aren't in the fresh worktree yet.
+  local t="$ORIGIN"; STACKS=(); IDES=()
+  # languages / frameworks (marker files)
+  if [[ -f "$t/Gemfile" ]]; then
+    { [[ -f "$t/config/application.rb" || -f "$t/bin/rails" ]] && STACKS+=("Rails"); } || STACKS+=("Ruby")
+  fi
+  if [[ -f "$t/package.json" ]]; then
+    local pm=npm; [[ -f "$t/yarn.lock" ]] && pm=yarn; [[ -f "$t/pnpm-lock.yaml" ]] && pm=pnpm
+    if   grep -q '"react-native"' "$t/package.json" 2>/dev/null; then STACKS+=("React Native")
+    elif grep -q '"next"'         "$t/package.json" 2>/dev/null; then STACKS+=("Next.js($pm)")
+    else STACKS+=("Node($pm)"); fi
+  fi
+  [[ -f "$t/pyproject.toml" || -f "$t/requirements.txt" || -f "$t/setup.py" ]] && STACKS+=("Python")
+  [[ -f "$t/go.mod" ]] && STACKS+=("Go")
+  [[ -f "$t/pom.xml" ]] && STACKS+=("Maven/JVM")
+  if [[ -f "$t/build.gradle" || -f "$t/build.gradle.kts" || -f "$t/settings.gradle" || -f "$t/settings.gradle.kts" ]]; then
+    { [[ -f "$t/app/build.gradle" || -f "$t/app/build.gradle.kts" || -f "$t/local.properties" ]] && STACKS+=("Android"); } || STACKS+=("Gradle/JVM")
+  elif [[ -f "$t/android/app/build.gradle" || -f "$t/android/build.gradle" || -f "$t/android/local.properties" ]]; then
+    STACKS+=("Android")   # React Native / mobile monorepo with native android/ dir
+  fi
+  ls "$t"/*.sln "$t"/*.csproj >/dev/null 2>&1 && STACKS+=(".NET")
+  [[ -f "$t/composer.json" ]] && STACKS+=("PHP")
+  { [[ -f "$t/Podfile" || -f "$t/ios/Podfile" ]] && STACKS+=("iOS"); }
+  [[ -f "$t/pubspec.yaml" ]] && STACKS+=("Flutter")
+  # IDE configs present (the env an IDE needs to open/run the worktree)
+  [[ -d "$t/.idea" ]]   && IDES+=("JetBrains")
+  [[ -d "$t/.vscode" ]] && IDES+=("VSCode")
+  [[ -d "$t/.fleet" ]]  && IDES+=("Fleet")
+  [[ -d "$t/.zed" ]]    && IDES+=("Zed")
+  [[ -d "$t/.nova" ]]   && IDES+=("Nova")
+  ls "$t"/*.xcworkspace >/dev/null 2>&1 && IDES+=("Xcode")
+  return 0
+}
+
 do_sync() {
   resolve_worktrees
   if [[ "$ORIGIN" == "$TARGET" ]]; then
     info "In the main worktree ($TARGET) — nothing to sync."
     exit 0   # silent under --quiet (the common case when a hook fires on a normal checkout)
   fi
-  info "git-worktree-yolo"
+  load_config
+  detect_stacks
+  local stacks_str ides_str
+  stacks_str="$(join_by ' · ' ${STACKS[@]+"${STACKS[@]}"})"
+  ides_str="$(join_by ' · ' ${IDES[@]+"${IDES[@]}"})"
+  info "git-worktree-yolo · $(basename "$TARGET")"
+  [[ -n "$stacks_str" ]] && log "stack:  ${stacks_str}"
+  [[ -n "$ides_str" ]]   && log "IDE:    ${ides_str}"
   log "origin: $ORIGIN"
   log "target: $TARGET"
   SYNCED=(); REWRITTEN=(); SKIPPED=()
@@ -180,13 +361,25 @@ do_sync() {
       | LC_ALL=C sort -u
   )
 
-  # In quiet (hook) mode, emit a single line only if we actually synced something.
+  # explicit pass for manifest `sync` entries — these may live inside skip-pruned dirs
+  # (e.g. vendor/keep.token) that enumeration never descends into.
+  local g
+  for g in ${CONFIG_SYNC[@]+"${CONFIG_SYNC[@]}"}; do
+    [[ -f "$ORIGIN/$g" ]] && sync_file "$g"
+  done
+
+  # In quiet (hook) mode, emit a single summary line only if we synced something.
   if [[ "$QUIET" == 1 ]]; then
     [[ "${#SYNCED[@]}" -gt 0 ]] && \
-      printf '\033[36mgit-worktree-yolo:\033[0m synced %d file(s) into %s\n' "${#SYNCED[@]}" "$TARGET" >&2
+      printf '\033[36mgit-worktree-yolo:\033[0m %s%s synced %d env file(s)\n' \
+        "$(basename "$TARGET")" "${stacks_str:+ [$stacks_str]}" "${#SYNCED[@]}" >&2
   else
     info "done: ${#SYNCED[@]} synced, ${#REWRITTEN[@]} path-rewritten, heavy/oversized skipped"
   fi
+
+  # detect & report (or run) the dependency bootstrap this worktree needs
+  detect_recreate
+  emit_recreate
 }
 
 # --- shared: write a post-checkout hook into DIR --------------------------------
