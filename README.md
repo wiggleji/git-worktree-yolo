@@ -14,7 +14,90 @@ Built on open standards, so one install works everywhere:
 - **`AGENTS.md`** — the shared cross-agent instructions standard.
 - **git hooks** — the engine is a portable bash script + `post-checkout`/`pre-commit` hooks, so it works in **any** agent (or none) the moment git runs.
 
-➡️ Jump to **[Works across agents](#works-across-agents-claude-code--openai-codex--google-antigravity)** for per-agent setup.
+## Contents
+
+- [Install](#install)
+- [Usage](#usage)
+- [The problem](#the-problem)
+- [What it does](#what-it-does) — incl. [Supported stacks & IDEs](#supported-stacks--ides)
+- [Safety — never commits secrets](#safety--never-commits-secrets)
+- [Works across agents](#works-across-agents-claude-code--openai-codex--google-antigravity)
+- [Automatic invocation](#automatic-invocation)
+- [Tuning](#tuning)
+- [Proof / tests](#proof--tests)
+- [How it works](#how-it-works-internals)
+- [License](#license)
+
+## Install
+
+Auto-detects your agents and installs the skill to the shared **`~/.agents/skills/`** (OpenAI
+Codex + Google Antigravity) and to **`~/.claude/skills/`** (Claude Code), plus each agent's
+slash-command/workflow wrapper. Target one explicitly with `--agent claude|codex|antigravity|all`.
+
+**Default — skill only, no hook** (you trigger it, nothing touches your git config):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wiggleji/git-worktree-yolo/main/install.sh | bash
+```
+
+**With the global auto-sync hook + secret guard** (every `git worktree add` self-heals; commits with secrets are blocked):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wiggleji/git-worktree-yolo/main/install.sh | bash -s -- --with-hook
+```
+
+**With ONLY the secret-commit guard** (no auto-sync — pure safety):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wiggleji/git-worktree-yolo/main/install.sh | bash -s -- --with-guard
+```
+
+Re-running updates in place. Override the target with `CLAUDE_CONFIG_DIR=...`. See
+[Works across agents](#works-across-agents-claude-code--openai-codex--google-antigravity) for
+Codex/Antigravity specifics.
+
+<details><summary>Other install methods</summary>
+
+**Project skill (shared with your team, zero per-developer install)** — commit the skill into
+your repo at the standard project path so every agent auto-discovers it on clone:
+
+```bash
+git clone --depth 1 https://github.com/wiggleji/git-worktree-yolo /tmp/wty
+# .agents/skills is the shared standard (Codex + Antigravity); .claude/skills for Claude Code
+cp -R /tmp/wty/skills/git-worktree-yolo .agents/skills/git-worktree-yolo
+cp -R /tmp/wty/skills/git-worktree-yolo .claude/skills/git-worktree-yolo
+```
+Then add an [`AGENTS.md`](AGENTS.md) (and one-line `CLAUDE.md`/`GEMINI.md` pointing to it) so
+every agent shares one source of truth.
+
+</details>
+
+## Usage
+
+```bash
+# the script lives wherever it was installed (same on every agent):
+S="$HOME/.agents/skills/git-worktree-yolo/git-worktree-yolo.sh"   # Codex / Antigravity
+# S="$HOME/.claude/skills/git-worktree-yolo/git-worktree-yolo.sh" # Claude Code
+
+bash "$S" --dry-run [WORKTREE_DIR]      # preview (do this first on a new repo)
+bash "$S" [WORKTREE_DIR]                # sync + report stack/IDE/next-steps + secret audit
+bash "$S" --bootstrap [WORKTREE_DIR]    # also RUN the dep installs (npm ci / pod install / …)
+bash "$S" --audit [WORKTREE_DIR]        # scan for committable secrets (exit 1 if any tracked)
+bash "$S" --install-hook                # per-repo: post-checkout sync + pre-commit secret guard
+bash "$S" --install-global-hook         # global: sync + secret guard for every repo
+bash "$S" --uninstall-global-hook       # turn the global hooks back off
+bash "$S" --install-guard               # global secret-commit guard ONLY (no auto-sync)
+```
+
+Run from inside a worktree, or pass its path. In the main worktree it's a safe no-op.
+
+Inside Claude Code you can also just say *"sync my worktree"*, or use the toggle command:
+
+```
+/worktree-yolo-hook on      # enable global auto-sync hook
+/worktree-yolo-hook off     # disable it
+/worktree-yolo-hook         # toggle current state
+```
 
 ## The problem
 
@@ -98,48 +181,6 @@ Safe-by-design exceptions (`*.example`, `*.sample`, `*.template`, `*.dist`, `*.p
 are never flagged. Override per repo in `.worktree-yolo` (`allow <glob>` / `secret <glob>`), or
 bypass a single commit with `git commit --no-verify`.
 
-## Install (one line)
-
-Auto-detects your agents and installs the skill to the shared **`~/.agents/skills/`** (OpenAI
-Codex + Google Antigravity) and to **`~/.claude/skills/`** (Claude Code), plus each agent's
-slash-command/workflow wrapper. Target one explicitly with `--agent claude|codex|antigravity|all`.
-
-**Default — skill only, no hook** (you trigger it, nothing touches your git config):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/wiggleji/git-worktree-yolo/main/install.sh | bash
-```
-
-**With the global auto-sync hook + secret guard** (every `git worktree add` self-heals; commits with secrets are blocked):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/wiggleji/git-worktree-yolo/main/install.sh | bash -s -- --with-hook
-```
-
-**With ONLY the secret-commit guard** (no auto-sync — pure safety):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/wiggleji/git-worktree-yolo/main/install.sh | bash -s -- --with-guard
-```
-
-Re-running updates in place. Override the target with `CLAUDE_CONFIG_DIR=...`.
-
-<details><summary>Other install methods</summary>
-
-**Project skill (shared with your team, zero per-developer install)** — commit the skill into
-your repo at the standard project path so every agent auto-discovers it on clone:
-
-```bash
-git clone --depth 1 https://github.com/wiggleji/git-worktree-yolo /tmp/wty
-# .agents/skills is the shared standard (Codex + Antigravity); .claude/skills for Claude Code
-cp -R /tmp/wty/skills/git-worktree-yolo .agents/skills/git-worktree-yolo
-cp -R /tmp/wty/skills/git-worktree-yolo .claude/skills/git-worktree-yolo
-```
-Then add an [`AGENTS.md`](AGENTS.md) (and one-line `CLAUDE.md`/`GEMINI.md` pointing to it) so
-every agent shares one source of truth.
-
-</details>
-
 ## Works across agents (Claude Code · OpenAI Codex · Google Antigravity)
 
 The engine is **agent-agnostic** — a bash script + git hooks. The git `post-checkout`/`pre-commit`
@@ -165,33 +206,6 @@ the slash-command wrapper differ; `install.sh` handles all three (target one wit
 
 ```bash
 curl -fsSL …/install.sh | bash -s -- --agent codex        # or: claude | antigravity | all
-```
-
-## Usage
-
-```bash
-# the script lives wherever it was installed (same on every agent):
-S="$HOME/.agents/skills/git-worktree-yolo/git-worktree-yolo.sh"   # Codex / Antigravity
-# S="$HOME/.claude/skills/git-worktree-yolo/git-worktree-yolo.sh" # Claude Code
-
-bash "$S" --dry-run [WORKTREE_DIR]      # preview (do this first on a new repo)
-bash "$S" [WORKTREE_DIR]                # sync + report stack/IDE/next-steps + secret audit
-bash "$S" --bootstrap [WORKTREE_DIR]    # also RUN the dep installs (npm ci / pod install / …)
-bash "$S" --audit [WORKTREE_DIR]        # scan for committable secrets (exit 1 if any tracked)
-bash "$S" --install-hook                # per-repo: post-checkout sync + pre-commit secret guard
-bash "$S" --install-global-hook         # global: sync + secret guard for every repo
-bash "$S" --uninstall-global-hook       # turn the global hooks back off
-bash "$S" --install-guard               # global secret-commit guard ONLY (no auto-sync)
-```
-
-Run from inside a worktree, or pass its path. In the main worktree it's a safe no-op.
-
-Inside Claude Code you can also just say *"sync my worktree"*, or use the toggle command:
-
-```
-/worktree-yolo-hook on      # enable global auto-sync hook
-/worktree-yolo-hook off     # disable it
-/worktree-yolo-hook         # toggle current state
 ```
 
 ## Automatic invocation
@@ -224,6 +238,7 @@ bash skills/git-worktree-yolo/test-advisory.sh     # heads-up for unfixable issu
 install/chain/uninstall in a sandboxed `HOME`. `test-multistack.sh` proves stack/IDE detection,
 the report, recreate guidance, the `.worktree-yolo` manifest, and `--bootstrap`. `test-secret-guard.sh`
 proves the secret audit, the pre-commit commit-block, the allow-list, and guard install/uninstall.
+`test-advisory.sh` proves the heads-up advisories for issues the sync can't fix.
 
 ## How it works (internals)
 
