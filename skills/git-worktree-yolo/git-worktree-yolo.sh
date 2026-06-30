@@ -414,6 +414,37 @@ detect_stacks() {
   return 0
 }
 
+# --- advisory: worktree-breaking issues the sync CANNOT fix --------------------
+# These live OUTSIDE the repo's gitignored layer (global IDE state, tracked files,
+# symlinks), so we surface them rather than silently mis-"fixing" them. Non-quiet only.
+advise_unfixable() {
+  [[ "$QUIET" == 1 ]] && return 0
+  local notes=() f t sl
+  # 1) JetBrains remote interpreters (Docker Compose / SSH / WSL) bound to the ORIGIN path.
+  #    Matching "$ORIGIN/" is boundary-safe (won't match the longer worktree path).
+  for f in "$HOME/Library/Application Support/JetBrains/"*/options/jdk.table.xml \
+           "$HOME/.config/JetBrains/"*/options/jdk.table.xml; do
+    [[ -f "$f" ]] && grep -qF "$ORIGIN/" "$f" 2>/dev/null && {
+      notes+=("JetBrains remote interpreter is bound to the ORIGIN checkout — create a per-worktree interpreter (Settings ▸ SDK). That binding is in the IDE's global config, not the repo, so it can't be synced.")
+      break; }
+  done
+  # 2) TRACKED files that hardcode the origin absolute path (rewriting them would be a git diff)
+  #    `|| true`: git grep exits 1 on no-match, which would abort under set -e + pipefail.
+  t="$(git -C "$TARGET" grep -lF "$ORIGIN/" -- . 2>/dev/null | head -3 || true)"
+  [[ -n "$t" ]] && notes+=("tracked file(s) hardcode the origin path — make them relative: $(echo "$t" | tr '\n' ' ')")
+  # 3) symlinks pointing back into the origin checkout
+  sl=""; local l tg
+  while IFS= read -r l; do
+    tg="$(readlink "$l" 2>/dev/null || true)"
+    [[ "$tg" == "$ORIGIN/"* ]] && sl+="${l#"$TARGET"/} "
+  done < <(find "$TARGET" \( "${PRUNE_ARGS[@]}" \) -prune -o -type l -print 2>/dev/null)
+  [[ -n "$sl" ]] && notes+=("symlink(s) point into the origin checkout: $sl")
+
+  [[ "${#notes[@]}" -eq 0 ]] && return 0
+  printf '\033[33m⚠ heads-up — may need manual attention (git-worktree-yolo cannot auto-fix these):\033[0m\n' >&2
+  local n; for n in "${notes[@]}"; do printf '    • %s\n' "$n" >&2; done
+}
+
 do_sync() {
   resolve_worktrees
   if [[ "$ORIGIN" == "$TARGET" ]]; then
@@ -463,6 +494,9 @@ do_sync() {
 
   # SAFETY (most important): never let env/secret values reach a commit.
   audit_secrets "$TARGET" "worktree" || true
+
+  # heads-up about worktree-breaking issues we cannot fix (global IDE state, tracked paths, …)
+  advise_unfixable
 }
 
 # --- secret-commit guard (invoked by the pre-commit hook) -----------------------

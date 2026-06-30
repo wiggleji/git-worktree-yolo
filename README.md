@@ -44,6 +44,10 @@ So you `git worktree add api-server-feature`, open it in your IDE, hit Run… an
 6. **Detects the stack(s) + IDE(s)** and prints a report: what was synced and which dependency
    bootstrap the worktree still needs (`npm ci`, `pod install`, `pip install`, …) — or runs
    them with `--bootstrap`.
+7. **Flags what it *can't* fix.** Some breakage lives outside the repo's gitignored layer — a
+   JetBrains/IDE remote interpreter bound to the origin path (a common Docker-Compose-in-worktree
+   failure), tracked files that hardcode the origin path, or symlinks into the origin checkout.
+   It surfaces these as a ⚠ heads-up with the fix, rather than silently mis-"fixing" them.
 
 ```
 git-worktree-yolo · api-server-feature
@@ -205,13 +209,14 @@ Add project-specific dirs there, or override the cap: `WTSYNC_MAX_BYTES=2097152 
 
 ## Proof / tests
 
-Four isolated harnesses (they never touch your real repos or `~/.gitconfig`) — **64 assertions**:
+Five isolated harnesses (they never touch your real repos or `~/.gitconfig`) — **69 assertions**:
 
 ```bash
 bash skills/git-worktree-yolo/simulate.sh          # core sync/rewrite/skip/zero-diff   → 18 passed
 bash skills/git-worktree-yolo/test-global-hook.sh  # global core.hooksPath hook          → 12 passed
 bash skills/git-worktree-yolo/test-multistack.sh   # stack/IDE detection, manifest, bootstrap → 19 passed
 bash skills/git-worktree-yolo/test-secret-guard.sh # audit, pre-commit block, allow-list → 15 passed
+bash skills/git-worktree-yolo/test-advisory.sh     # heads-up for unfixable issues       →  5 passed
 ```
 
 `simulate.sh` asserts sync, boundary-aware path rewrite, binary-verbatim copy, heavy-dir skip,

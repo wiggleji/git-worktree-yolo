@@ -136,4 +136,12 @@ bash "$D/simulate.sh"           # core sync/rewrite/skip/zero-diff/idempotency �
 bash "$D/test-global-hook.sh"   # global core.hooksPath install/chain/uninstall → 12 passed
 bash "$D/test-multistack.sh"    # stack+IDE detection, report, manifest, --bootstrap → 19 passed
 bash "$D/test-secret-guard.sh"  # secret audit, pre-commit block, allow-list → 15 passed
+bash "$D/test-advisory.sh"      # heads-up for issues it can't auto-fix → 5 passed
 ```
+
+## Heads-up: issues it can't auto-fix
+
+The sync only touches the repo's gitignored layer, so it surfaces (never silently mis-fixes)
+breakage that lives elsewhere: a JetBrains/IDE remote interpreter bound to the origin path (the
+usual Docker-Compose-in-worktree failure — fix by adding a per-worktree interpreter), tracked
+files hardcoding the origin path, and symlinks into the origin checkout.

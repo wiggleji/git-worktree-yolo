@@ -8,6 +8,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/git-worktree-yolo.sh"
 SB="$(mktemp -d "${TMPDIR:-/tmp}/wtms.XXXXXX")"; SB="$(cd "$SB" && pwd -P)"
 trap 'rm -rf "$SB"' EXIT
+# hermetic: ignore the user's global git config (e.g. an installed global post-checkout hook)
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 pass=0; fail=0
 ok(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
 no(){ printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }

@@ -11,6 +11,9 @@ SCRIPT="$HERE/git-worktree-yolo.sh"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/wtsim.XXXXXX")"
 SANDBOX="$(cd "$SANDBOX" && pwd -P)"   # canonicalize (macOS /var -> /private/var) to match git's report
 trap 'rm -rf "$SANDBOX"' EXIT
+# hermetic: ignore the user's global git config — an installed global post-checkout hook would
+# otherwise auto-sync the sandbox worktree before our "missing" assertions run.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 ORIGIN="$SANDBOX/api-server"
 WT="$SANDBOX/api-server-feature-123"
 
