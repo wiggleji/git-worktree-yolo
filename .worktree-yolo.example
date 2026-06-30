@@ -16,3 +16,12 @@
 # custom "if this dir is missing in the worktree, suggest this command":
 # recreate  node_modules  -- pnpm install --frozen-lockfile
 # recreate  .venv         -- uv sync
+
+# SECRET GUARD ---------------------------------------------------------------
+# treat extra files as secrets the pre-commit guard must block:
+# secret  config/*.token
+# secret  *.gpg
+#
+# allow an otherwise-secret-looking file to be committed (e.g. a sample/fixture):
+# allow  .env.ci
+# allow  test/fixtures/dummy.key

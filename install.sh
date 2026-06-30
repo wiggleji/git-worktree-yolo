@@ -5,20 +5,26 @@
 #   Default (skill + command, NO hook):
 #     curl -fsSL https://raw.githubusercontent.com/wiggleji/git-worktree-yolo/main/install.sh | bash
 #
-#   With the global auto-sync hook enabled:
+#   With the global auto-sync hook + secret guard:
 #     curl -fsSL https://raw.githubusercontent.com/wiggleji/git-worktree-yolo/main/install.sh | bash -s -- --with-hook
 #
+#   With ONLY the secret-commit guard (no auto-sync):
+#     curl -fsSL https://raw.githubusercontent.com/wiggleji/git-worktree-yolo/main/install.sh | bash -s -- --with-guard
+#
 # Installs into ~/.claude (personal scope): the skill, the /worktree-yolo-hook command,
-# and optionally the global post-checkout hook. Re-running updates in place.
+# and optionally global git hooks (auto-sync and/or secret guard). Re-running updates in place.
 #
 set -euo pipefail
 
 REPO="https://github.com/wiggleji/git-worktree-yolo"
 BRANCH="main"
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-WITH_HOOK=0
+WITH_HOOK=0; WITH_GUARD=0
 [[ "${WT_YOLO_HOOK:-0}" == 1 ]] && WITH_HOOK=1
-for a in "$@"; do [[ "$a" == "--with-hook" ]] && WITH_HOOK=1; done
+for a in "$@"; do
+  [[ "$a" == "--with-hook" ]]  && WITH_HOOK=1
+  [[ "$a" == "--with-guard" ]] && WITH_GUARD=1
+done
 
 c_ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
 c_info() { printf '\033[36m%s\033[0m\n' "$*"; }
@@ -49,13 +55,19 @@ mkdir -p "$CLAUDE_DIR/commands"
 cp "$TMP/repo/commands/worktree-yolo-hook.md" "$CLAUDE_DIR/commands/worktree-yolo-hook.md"
 c_ok "command      → /worktree-yolo-hook"
 
-# optional global hook
+# optional global hooks
+S="$CLAUDE_DIR/skills/git-worktree-yolo/git-worktree-yolo.sh"
 if [[ "$WITH_HOOK" == 1 ]]; then
-  bash "$CLAUDE_DIR/skills/git-worktree-yolo/git-worktree-yolo.sh" --install-global-hook
-  c_ok "global hook  → ON (every 'git worktree add' self-heals)"
+  bash "$S" --install-global-hook
+  c_ok "global hooks → ON: auto-sync worktrees + pre-commit secret guard (every repo)"
+elif [[ "$WITH_GUARD" == 1 ]]; then
+  bash "$S" --install-guard
+  c_ok "secret guard → ON: blocks committing env/secret files (every repo)"
 else
-  c_info "global hook   → not installed (default). Turn on anytime with: /worktree-yolo-hook on"
+  c_info "global hooks  → not installed (default). Enable:"
+  c_info "                /worktree-yolo-hook on   (auto-sync + secret guard)"
+  c_info "                bash \"$S\" --install-guard   (secret guard only)"
 fi
 
 echo
-c_info "Done. In Claude Code: say \"sync my worktree\" or run /worktree-yolo-hook to toggle auto-sync."
+c_info "Done. The skill audits for committable secrets on every run; say \"sync my worktree\"."

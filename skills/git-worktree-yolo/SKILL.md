@@ -105,6 +105,18 @@ skip      data/fixtures                    # never sync this
 recreate  node_modules -- pnpm install     # custom "missing dir → command" hint
 ```
 
+## Safety — never commits secrets (the top priority)
+
+1. **Writes only gitignored files** (`git check-ignore`) — a synced `.env`/key can't become a
+   diff or be caught by `git add -A`.
+2. **Refuses to misplace a secret** — if a secret isn't gitignored where it would land, the sync
+   aborts that file with a CRITICAL error.
+3. **Audit + commit block** — every run audits for committable secrets (tracked or not-ignored);
+   `--install-guard` adds a pre-commit hook that **blocks any commit staging** `.env*`, `*.key`,
+   `*.pem`, `*.jks`, `*.keystore`, `*.p12`, `master.key`, … (`*.example`/`*.sample`/`*.pub`/`*.enc`
+   are exempt). Per-repo override: `.worktree-yolo` `allow <glob>` / `secret <glob>`; one-off bypass:
+   `git commit --no-verify`. `--install-global-hook` includes this guard.
+
 ## Common Mistakes
 
 - **`cp -r origin/* worktree/`** — clobbers tracked files and copies `node_modules`, producing
@@ -120,7 +132,8 @@ Three isolated harnesses ship alongside this skill (none touch real repos or `~/
 
 ```bash
 D="$(dirname "$0")"
-bash "$D/simulate.sh"          # core sync/rewrite/skip/zero-diff/idempotency → 18 passed
-bash "$D/test-global-hook.sh"  # global core.hooksPath install/chain/uninstall → 12 passed
-bash "$D/test-multistack.sh"   # stack+IDE detection, report, manifest, --bootstrap → 19 passed
+bash "$D/simulate.sh"           # core sync/rewrite/skip/zero-diff/idempotency → 18 passed
+bash "$D/test-global-hook.sh"   # global core.hooksPath install/chain/uninstall → 12 passed
+bash "$D/test-multistack.sh"    # stack+IDE detection, report, manifest, --bootstrap → 19 passed
+bash "$D/test-secret-guard.sh"  # secret audit, pre-commit block, allow-list → 15 passed
 ```

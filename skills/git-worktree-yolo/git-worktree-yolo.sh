@@ -12,14 +12,21 @@
 # Safety invariant: only ever writes paths that are gitignored in the TARGET worktree,
 # so it can never produce a `git status` diff (tracked or untracked).
 #
+# SAFETY FIRST: this tool only ever writes gitignored files (zero git diff), refuses to place
+# a secret where it isn't gitignored, audits the repo for committable secrets on every run,
+# and can install a pre-commit hook that BLOCKS committing env/secret files.
+#
 # Usage:
-#   git-worktree-yolo.sh [TARGET_DIR]          # sync current (or named) worktree
+#   git-worktree-yolo.sh [TARGET_DIR]          # sync + stack/IDE report + secret audit
 #   git-worktree-yolo.sh --dry-run [TARGET_DIR]# preview only
 #   git-worktree-yolo.sh --bootstrap [TARGET_DIR] # also RUN the dep install commands
+#   git-worktree-yolo.sh --audit [TARGET_DIR]  # scan for committable secrets (exit 1 if any tracked)
 #   git-worktree-yolo.sh --quiet [TARGET_DIR]  # silent unless something is synced (for hooks)
-#   git-worktree-yolo.sh --install-hook        # per-repo post-checkout hook (this repo only)
-#   git-worktree-yolo.sh --install-global-hook # GLOBAL post-checkout hook (all repos, via core.hooksPath)
+#   git-worktree-yolo.sh --install-hook        # per-repo hooks (post-checkout sync + pre-commit guard)
+#   git-worktree-yolo.sh --install-global-hook # GLOBAL hooks (all repos): sync + secret-commit guard
 #   git-worktree-yolo.sh --uninstall-global-hook
+#   git-worktree-yolo.sh --install-guard       # GLOBAL secret-commit guard ONLY (no auto-sync)
+#   git-worktree-yolo.sh --uninstall-guard
 #
 set -euo pipefail
 
@@ -58,10 +65,27 @@ SKIP_PATHS=( ".idea/modules.xml" )
 # artifact and skipped. Override with WTSYNC_MAX_BYTES.
 MAX_BYTES="${WTSYNC_MAX_BYTES:-1048576}"   # 1 MiB
 
+# --- SECRETS: the #1 safety concern — these must NEVER be committed -----------
+# Basename globs treated as secrets. Committing any of these is a leak.
+SECRET_NAMES=(
+  ".env" ".env.*" ".envrc"
+  "*.pem" "*.key" "*.keystore" "*.jks" "*.p12" "*.pfx"
+  "id_rsa" "id_dsa" "id_ecdsa" "id_ed25519" "*.ppk"
+  "master.key" "credentials.json" "service-account*.json" "*serviceaccount*.json"
+  "secrets.yml" "secrets.yaml" "secring.*"
+)
+# Safe exceptions — templates/examples/public keys are meant to be committed.
+SECRET_ALLOW=(
+  "*.example" "*.sample" "*.template" "*.dist" "*.enc" "*.pub"
+  ".env.example" ".env.sample" ".env.template" ".env.dist" ".env.*.example"
+)
+
 # Per-repo manifest (committed at repo root). Populated by load_config().
 CONFIG_SYNC=()      # globs to force-include even if the skip-list would drop them
 CONFIG_SKIP=()      # extra paths/globs to skip
 CONFIG_RECREATE=()  # "depdir|||command" entries; emitted if depdir missing in target
+CONFIG_SECRET=()    # extra secret globs to guard
+CONFIG_ALLOW=()     # globs explicitly allowed to be committed (override secret guard)
 
 DRY_RUN=0
 QUIET=0
@@ -74,6 +98,10 @@ while [[ $# -gt 0 ]]; do
     --install-hook)          ACTION="install-hook" ;;
     --install-global-hook)   ACTION="install-global-hook" ;;
     --uninstall-global-hook) ACTION="uninstall-global-hook" ;;
+    --install-guard)         ACTION="install-guard" ;;
+    --uninstall-guard)       ACTION="uninstall-guard" ;;
+    --audit)                 ACTION="audit" ;;
+    --pre-commit-guard)      ACTION="pre-commit-guard" ;;   # internal: invoked by the hook
     --dry-run)               DRY_RUN=1 ;;
     --bootstrap)             BOOTSTRAP=1 ;;
     --quiet|-q)              QUIET=1 ;;
@@ -87,6 +115,7 @@ done
 log()  { [[ "$QUIET" == 1 ]] && return 0; printf '  %s\n' "$*" >&2; }
 info() { [[ "$QUIET" == 1 ]] && return 0; printf '\033[36m%s\033[0m\n' "$*" >&2; }
 warn() { printf '\033[33mwarn:\033[0m %s\n' "$*" >&2; }
+crit() { printf '\033[1;31m‼ SECRET:\033[0m %s\n' "$*" >&2; }   # always shown (even --quiet)
 
 # absolute path to this script (for baking into installed hooks)
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
@@ -105,6 +134,49 @@ resolve_worktrees() {
 
 # --- guard: is REL gitignored in the target worktree? ------------------------
 target_ignored() { git -C "$TARGET" check-ignore -q "$1"; }
+
+# --- SECRET classification ----------------------------------------------------
+# A path is a secret if its basename matches a secret glob AND not an allow glob.
+is_allowed() {
+  local base="${1##*/}" g
+  for g in "${SECRET_ALLOW[@]}" ${CONFIG_ALLOW[@]+"${CONFIG_ALLOW[@]}"}; do
+    # shellcheck disable=SC2053
+    [[ "$base" == $g || "$1" == $g ]] && return 0
+  done
+  return 1
+}
+is_secret() {
+  local base="${1##*/}" g
+  is_allowed "$1" && return 1
+  for g in "${SECRET_NAMES[@]}" ${CONFIG_SECRET[@]+"${CONFIG_SECRET[@]}"}; do
+    # shellcheck disable=SC2053
+    [[ "$base" == $g ]] && return 0
+  done
+  return 1
+}
+
+# --- audit a repo dir for secrets at risk of being committed ------------------
+# CRITICAL: a secret already TRACKED by git (it's in history / will commit).
+# WARNING:  a secret in the working tree that is NOT gitignored (a `git add -A` traps it).
+# Returns the number of CRITICAL findings.
+audit_secrets() {
+  local dir="$1" label="$2" rel crit_n=0 warn_n=0
+  # tracked secrets — already committed, the worst case
+  while IFS= read -r rel; do
+    [[ -z "$rel" ]] && continue
+    is_secret "$rel" && { crit "$label: '$rel' is TRACKED by git — it is (or will be) committed."; crit_n=$((crit_n+1)); }
+  done < <(git -C "$dir" ls-files 2>/dev/null)
+  # untracked + not-ignored secrets — one `git add -A` away from a leak
+  while IFS= read -r rel; do
+    [[ -z "$rel" ]] && continue
+    if is_secret "$rel"; then
+      warn "$label: '$rel' is NOT gitignored — add it to .gitignore so it can never be committed."
+      warn_n=$((warn_n+1))
+    fi
+  done < <(git -C "$dir" ls-files --others --exclude-standard 2>/dev/null)
+  [[ "$crit_n" -gt 0 ]] && crit "$label: $crit_n tracked secret(s) — remove with: git rm --cached <file>  (then commit & rotate them)"
+  return "$crit_n"
+}
 
 # --- should REL be skipped (heavy/regenerable dir, or junk basename)? --------
 is_skipped() {
@@ -145,7 +217,12 @@ sync_file() {
 
   # invariant: refuse to write anything not gitignored in the target
   if ! target_ignored "$rel"; then
-    warn "skip (not gitignored in target, would create a diff): $rel"
+    if is_secret "$rel"; then
+      crit "refusing to place secret '$rel' in the worktree — it is NOT gitignored there, so"
+      crit "syncing it would risk a commit. Add it to .gitignore first, then re-run."
+    else
+      warn "skip (not gitignored in target, would create a diff): $rel"
+    fi
     return 0
   fi
 
@@ -215,8 +292,10 @@ load_config() {
     kind="${line%%[[:space:]]*}"
     rest="${line#"$kind"}"; rest="${rest#"${rest%%[![:space:]]*}"}"  # ltrim remainder
     case "$kind" in
-      sync) CONFIG_SYNC+=("$rest") ;;
-      skip) CONFIG_SKIP+=("$rest") ;;
+      sync)   CONFIG_SYNC+=("$rest") ;;
+      skip)   CONFIG_SKIP+=("$rest") ;;
+      secret) CONFIG_SECRET+=("$rest") ;;
+      allow)  CONFIG_ALLOW+=("$rest") ;;
       recreate)
         if [[ "$rest" == *" -- "* ]]; then
           dir="${rest%% -- *}"; cmd="${rest#* -- }"
@@ -224,8 +303,9 @@ load_config() {
         fi ;;
     esac
   done < "$f"
-  [[ "${#CONFIG_SYNC[@]}${#CONFIG_SKIP[@]}${#CONFIG_RECREATE[@]}" != "000" ]] && \
-    log "loaded .worktree-yolo (${#CONFIG_SYNC[@]} sync, ${#CONFIG_SKIP[@]} skip, ${#CONFIG_RECREATE[@]} recreate)"
+  local n=$(( ${#CONFIG_SYNC[@]} + ${#CONFIG_SKIP[@]} + ${#CONFIG_RECREATE[@]} + ${#CONFIG_SECRET[@]} + ${#CONFIG_ALLOW[@]} ))
+  [[ "$n" -gt 0 ]] && log "loaded .worktree-yolo (${#CONFIG_SYNC[@]} sync · ${#CONFIG_SKIP[@]} skip · ${#CONFIG_RECREATE[@]} recreate · ${#CONFIG_SECRET[@]} secret · ${#CONFIG_ALLOW[@]} allow)"
+  return 0   # IMPORTANT: never let the last command's status leak out under `set -e`
 }
 
 # --- detect which dependency bootstraps the worktree needs ----------------------
@@ -380,97 +460,171 @@ do_sync() {
   # detect & report (or run) the dependency bootstrap this worktree needs
   detect_recreate
   emit_recreate
+
+  # SAFETY (most important): never let env/secret values reach a commit.
+  audit_secrets "$TARGET" "worktree" || true
 }
 
-# --- shared: write a post-checkout hook into DIR --------------------------------
-# Preserves any pre-existing post-checkout (moved to .prev and chained).
-# $1 = hooks dir, $2 = 1 to also chain repo-local hooks bypassed by core.hooksPath.
+# --- secret-commit guard (invoked by the pre-commit hook) -----------------------
+# Blocks a commit that stages any env/secret file. The teeth of "never commit secrets".
+pre_commit_guard() {
+  TARGET="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+  local common; common="$(git rev-parse --git-common-dir)"
+  case "$common" in /*) : ;; *) common="$TARGET/$common" ;; esac
+  ORIGIN="$(cd "$(dirname "$common")" && pwd)"
+  load_config
+  local rel offenders=()
+  while IFS= read -r rel; do
+    [[ -z "$rel" ]] && continue
+    is_secret "$rel" && offenders+=("$rel")
+  done < <(git diff --cached --name-only --diff-filter=AM 2>/dev/null)
+  [[ "${#offenders[@]}" -eq 0 ]] && exit 0
+  crit "COMMIT BLOCKED — these staged files look like secrets and must never be committed:"
+  local f; for f in "${offenders[@]}"; do printf '      \033[1;31m%s\033[0m\n' "$f" >&2; done
+  crit "fix:  git rm --cached <file>  then add it to .gitignore  (rotate it if already pushed)"
+  crit "safe on purpose?  allow it in .worktree-yolo ('allow <glob>')  or bypass: git commit --no-verify"
+  exit 1
+}
+
+# --- standalone audit: scan a repo for committable secrets ----------------------
+do_audit() {
+  resolve_worktrees
+  load_config
+  info "secret audit · $(basename "$TARGET")"
+  local n=0
+  audit_secrets "$TARGET" "repo" || n=$?
+  if [[ "$n" -eq 0 ]]; then info "✓ no committed secrets detected."; else exit 1; fi
+}
+
+# --- shared hook helpers --------------------------------------------------------
 MARKER="# >>> git-worktree-yolo managed hook >>>"
-write_post_checkout_hook() {
-  local dir="$1" chain_repo_local="$2" hook="$dir/post-checkout"
-  mkdir -p "$dir"
+preserve_existing() {   # move a pre-existing, non-managed hook aside so we can chain it
+  local hook="$1"
   if [[ -f "$hook" ]] && ! grep -qF "$MARKER" "$hook"; then
     mv "$hook" "$hook.prev"
-    warn "existing post-checkout preserved as $hook.prev (it will still run, chained)"
+    warn "existing $(basename "$hook") preserved as $hook.prev (still runs, chained)"
   fi
+}
+# post-checkout: auto-sync a new worktree.  $1=dir  $2=1 to chain repo-local hook
+write_post_checkout_hook() {
+  local dir="$1" chain="$2" hook="$dir/post-checkout"
+  mkdir -p "$dir"; preserve_existing "$hook"
   cat > "$hook" <<EOF
 #!/usr/bin/env bash
 $MARKER
 # Auto-heals a new git worktree's machine-local env. Safe no-op outside worktrees.
-# post-checkout args: \$1 prev-HEAD \$2 new-HEAD \$3 flag(1=branch/ref checkout)
 [ "\${3:-1}" = 1 ] && "$SELF" --quiet "\$PWD" || true
-# chain a previously-installed hook displaced by this one
 [ -x "$hook.prev" ] && "$hook.prev" "\$@"
 EOF
-  if [[ "$chain_repo_local" == 1 ]]; then
-    cat >> "$hook" <<'EOF'
-# chain the repo-local post-checkout that a global core.hooksPath would bypass
+  [[ "$chain" == 1 ]] && cat >> "$hook" <<'EOF'
 __rl="$(git rev-parse --git-common-dir 2>/dev/null)/hooks/post-checkout"
 [ -x "$__rl" ] && [ ! "$__rl" -ef "$0" ] && "$__rl" "$@"
 EOF
+  echo 'exit 0' >> "$hook"; chmod +x "$hook"
+}
+# pre-commit: BLOCK committing secrets.  $1=dir  $2=1 to chain repo-local hook
+write_pre_commit_hook() {
+  local dir="$1" chain="$2" hook="$dir/pre-commit"
+  mkdir -p "$dir"; preserve_existing "$hook"
+  cat > "$hook" <<EOF
+#!/usr/bin/env bash
+$MARKER
+# Blocks committing env/secret files. Bypass (discouraged): git commit --no-verify
+"$SELF" --pre-commit-guard || exit 1
+[ -x "$hook.prev" ] && { "$hook.prev" "\$@" || exit \$?; }
+EOF
+  [[ "$chain" == 1 ]] && cat >> "$hook" <<'EOF'
+__rl="$(git rev-parse --git-common-dir 2>/dev/null)/hooks/pre-commit"
+[ -x "$__rl" ] && [ ! "$__rl" -ef "$0" ] && { "$__rl" "$@" || exit $?; }
+EOF
+  echo 'exit 0' >> "$hook"; chmod +x "$hook"
+}
+remove_managed_hook() {   # restore .prev or remove, only if the hook is ours
+  local dir="$1" name="$2" hook="$1/$2"
+  if [[ -f "$hook" ]] && grep -qF "$MARKER" "$hook"; then
+    if [[ -f "$hook.prev" ]]; then mv "$hook.prev" "$hook"; info "restored previous $name"
+    else rm -f "$hook"; info "removed managed $name"; fi
+  elif [[ -e "$hook" ]]; then warn "$name in $dir is not ours — left untouched."; fi
+}
+hooks_dir_or_default() {   # echo existing global hooksPath (abs) or our default
+  local d; d="$(git config --global core.hooksPath || true)"
+  if [[ -n "$d" ]]; then case "$d" in "~"*) d="$HOME${d#\~}" ;; esac; printf '%s' "$d"
+  else printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/git/hooks"; fi
+}
+maybe_unset_hookspath() {
+  local dir="$1"
+  [[ "$dir" == "${XDG_CONFIG_HOME:-$HOME/.config}/git/hooks" ]] || { warn "left core.hooksPath=$dir as-is (predates this tool)."; return 0; }
+  if [[ ! -e "$dir/post-checkout" && ! -e "$dir/pre-commit" ]]; then
+    git config --global --unset core.hooksPath || true
+    info "unset global core.hooksPath (no managed hooks remain)."
   fi
-  echo 'exit 0' >> "$hook"
-  chmod +x "$hook"
 }
 
-# --- per-repo hook (this repo's shared git dir only) ----------------------------
+# --- per-repo hooks (this repo's shared git dir only) ---------------------------
 install_hook() {
   resolve_worktrees
   local hookdir; hookdir="$(git -C "$TARGET" rev-parse --git-common-dir)/hooks"
   case "$hookdir" in /*) : ;; *) hookdir="$TARGET/$hookdir" ;; esac
   write_post_checkout_hook "$hookdir" 0
-  info "installed per-repo post-checkout hook: $hookdir/post-checkout"
-  log "every 'git worktree add' in THIS repo will self-sync."
+  write_pre_commit_hook    "$hookdir" 0
+  info "installed per-repo hooks in $hookdir:"
+  log  "  post-checkout → auto-sync new worktrees of THIS repo"
+  log  "  pre-commit    → block committing env/secret files"
 }
 
-# --- global hook (all repos on this machine, via core.hooksPath) ----------------
+# --- global hooks (all repos, via core.hooksPath): sync + secret guard ----------
 install_global_hook() {
-  local dir existing
-  existing="$(git config --global core.hooksPath || true)"
-  if [[ -n "$existing" ]]; then
-    case "$existing" in "~"*) existing="$HOME${existing#\~}" ;; esac
-    dir="$existing"
-    info "core.hooksPath already set → installing into existing dir: $dir"
-  else
-    dir="${XDG_CONFIG_HOME:-$HOME/.config}/git/hooks"
-    write_post_checkout_hook "$dir" 1
-    git config --global core.hooksPath "$dir"
-    info "installed GLOBAL post-checkout hook: $dir/post-checkout"
-    warn "set global core.hooksPath=$dir — git now reads hooks from here for ALL repos."
-    warn "your hook chains to each repo's .git/hooks/post-checkout, but OTHER hook types"
-    warn "(pre-commit, etc.) in .git/hooks will no longer run unless copied here. Reverse with:"
-    warn "  $SELF --uninstall-global-hook"
-    log "every 'git worktree add' in ANY repo will now self-sync."
-    return 0
-  fi
+  local dir was_unset=0
+  [[ -z "$(git config --global core.hooksPath || true)" ]] && was_unset=1
+  dir="$(hooks_dir_or_default)"
+  [[ "$was_unset" == 0 ]] && info "core.hooksPath already set → installing into: $dir"
   write_post_checkout_hook "$dir" 1
-  info "installed GLOBAL post-checkout hook: $dir/post-checkout"
-  log "every 'git worktree add' in ANY repo will now self-sync."
+  write_pre_commit_hook    "$dir" 1
+  if [[ "$was_unset" == 1 ]]; then
+    git config --global core.hooksPath "$dir"
+    warn "set global core.hooksPath=$dir — git reads hooks from here for ALL repos."
+    warn "hooks chain to each repo's .git/hooks, but other hook types there won't run unless copied."
+    warn "reverse with: $SELF --uninstall-global-hook"
+  fi
+  info "GLOBAL hooks installed in $dir:"
+  log  "  post-checkout → auto-sync new worktrees (any repo)"
+  log  "  pre-commit    → block committing env/secret files (any repo)"
+}
+
+# install ONLY the secret-commit guard globally (no auto-sync) --------------------
+install_guard() {
+  local dir was_unset=0
+  [[ -z "$(git config --global core.hooksPath || true)" ]] && was_unset=1
+  dir="$(hooks_dir_or_default)"
+  write_pre_commit_hook "$dir" 1
+  if [[ "$was_unset" == 1 ]]; then
+    git config --global core.hooksPath "$dir"
+    warn "set global core.hooksPath=$dir (git reads hooks from here for ALL repos)."
+  fi
+  info "GLOBAL secret-commit guard installed: $dir/pre-commit"
 }
 
 uninstall_global_hook() {
-  local dir; dir="$(git config --global core.hooksPath || true)"
-  [[ -z "$dir" ]] && { info "no global core.hooksPath set — nothing to uninstall."; exit 0; }
-  case "$dir" in "~"*) dir="$HOME${dir#\~}" ;; esac
-  local hook="$dir/post-checkout"
-  if [[ -f "$hook" ]] && grep -qF "$MARKER" "$hook"; then
-    if [[ -f "$hook.prev" ]]; then mv "$hook.prev" "$hook"; info "restored previous hook: $hook"
-    else rm -f "$hook"; info "removed our hook: $hook"; fi
-  else
-    warn "post-checkout in $dir is not ours — leaving it untouched."
-  fi
-  # only unset core.hooksPath if WE were the one pointing it at our default dir
-  if [[ "$dir" == "${XDG_CONFIG_HOME:-$HOME/.config}/git/hooks" ]]; then
-    git config --global --unset core.hooksPath || true
-    info "unset global core.hooksPath."
-  else
-    warn "left core.hooksPath=$dir as-is (it predates this tool)."
-  fi
+  [[ -z "$(git config --global core.hooksPath || true)" ]] && { info "no global core.hooksPath — nothing to uninstall."; exit 0; }
+  local dir; dir="$(hooks_dir_or_default)"
+  remove_managed_hook "$dir" post-checkout
+  remove_managed_hook "$dir" pre-commit
+  maybe_unset_hookspath "$dir"
+}
+uninstall_guard() {
+  [[ -z "$(git config --global core.hooksPath || true)" ]] && { info "no global core.hooksPath — nothing to uninstall."; exit 0; }
+  local dir; dir="$(hooks_dir_or_default)"
+  remove_managed_hook "$dir" pre-commit
+  maybe_unset_hookspath "$dir"
 }
 
 case "$ACTION" in
   install-hook)          install_hook ;;
   install-global-hook)   install_global_hook ;;
   uninstall-global-hook) uninstall_global_hook ;;
+  install-guard)         install_guard ;;
+  uninstall-guard)       uninstall_guard ;;
+  audit)                 do_audit ;;
+  pre-commit-guard)      pre_commit_guard ;;
   sync)                  do_sync ;;
 esac

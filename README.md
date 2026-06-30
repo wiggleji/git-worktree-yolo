@@ -62,6 +62,29 @@ re-install — a worktree shares those caches. Teams tune everything via a commi
 
 Runs on macOS (bash 3.2+) and Linux; needs `git` and `perl` (both standard).
 
+## Safety — never commits secrets
+
+Convenience must never leak credentials. This is enforced at three layers:
+
+1. **Writes only gitignored files.** Every file the sync writes must be gitignored in the
+   target (`git check-ignore`) — so a synced `.env` or key can never become a `git status` diff
+   or be staged by `git add -A`.
+2. **Refuses to misplace a secret.** If a secret (`.env*`, `*.key`, `*.pem`, `*.jks`,
+   `*.keystore`, `*.p12`, `master.key`, …) isn't gitignored where it would land, the sync
+   **refuses** it with a CRITICAL error instead of risking a commit.
+3. **Audit + commit block.** Every run audits the repo for committable secrets (tracked, or
+   not-gitignored) and reports them. The optional **pre-commit guard** *blocks any commit* that
+   stages a secret file:
+
+```bash
+bash "$S" --audit            # scan: exits non-zero if a secret is tracked
+bash "$S" --install-guard    # global pre-commit hook that blocks committing secrets
+```
+
+Safe-by-design exceptions (`*.example`, `*.sample`, `*.template`, `*.dist`, `*.pub`, `*.enc`)
+are never flagged. Override per repo in `.worktree-yolo` (`allow <glob>` / `secret <glob>`), or
+bypass a single commit with `git commit --no-verify`.
+
 ## Install (one line)
 
 Installs the skill + the `/worktree-yolo-hook` command into `~/.claude`.
@@ -72,10 +95,16 @@ Installs the skill + the `/worktree-yolo-hook` command into `~/.claude`.
 curl -fsSL https://raw.githubusercontent.com/wiggleji/git-worktree-yolo/main/install.sh | bash
 ```
 
-**With the global auto-sync hook** (every `git worktree add` on your machine self-heals):
+**With the global auto-sync hook + secret guard** (every `git worktree add` self-heals; commits with secrets are blocked):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wiggleji/git-worktree-yolo/main/install.sh | bash -s -- --with-hook
+```
+
+**With ONLY the secret-commit guard** (no auto-sync — pure safety):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wiggleji/git-worktree-yolo/main/install.sh | bash -s -- --with-guard
 ```
 
 Re-running updates in place. Override the target with `CLAUDE_CONFIG_DIR=...`.
@@ -100,11 +129,13 @@ Claude Code auto-discovers `.claude/skills/`, so anyone who clones the repo gets
 S="$HOME/.claude/skills/git-worktree-yolo/git-worktree-yolo.sh"
 
 bash "$S" --dry-run [WORKTREE_DIR]      # preview (do this first on a new repo)
-bash "$S" [WORKTREE_DIR]                # sync + report stack/IDE/next-steps — idempotent
+bash "$S" [WORKTREE_DIR]                # sync + report stack/IDE/next-steps + secret audit
 bash "$S" --bootstrap [WORKTREE_DIR]    # also RUN the dep installs (npm ci / pod install / …)
-bash "$S" --install-hook                # per-repo: this repo's 'git worktree add' self-heals
-bash "$S" --install-global-hook         # global: every repo on the machine self-heals
-bash "$S" --uninstall-global-hook       # turn the global hook back off
+bash "$S" --audit [WORKTREE_DIR]        # scan for committable secrets (exit 1 if any tracked)
+bash "$S" --install-hook                # per-repo: post-checkout sync + pre-commit secret guard
+bash "$S" --install-global-hook         # global: sync + secret guard for every repo
+bash "$S" --uninstall-global-hook       # turn the global hooks back off
+bash "$S" --install-guard               # global secret-commit guard ONLY (no auto-sync)
 ```
 
 Run from inside a worktree, or pass its path. In the main worktree it's a safe no-op.
@@ -132,19 +163,20 @@ Add project-specific dirs there, or override the cap: `WTSYNC_MAX_BYTES=2097152 
 
 ## Proof / tests
 
-Three isolated harnesses (they never touch your real repos or `~/.gitconfig`) — 49 assertions:
+Four isolated harnesses (they never touch your real repos or `~/.gitconfig`) — **64 assertions**:
 
 ```bash
-bash skills/git-worktree-yolo/simulate.sh         # core sync/rewrite/skip/zero-diff → 18 passed
-bash skills/git-worktree-yolo/test-global-hook.sh # global core.hooksPath hook        → 12 passed
-bash skills/git-worktree-yolo/test-multistack.sh  # stack/IDE detection, manifest, --bootstrap → 19 passed
+bash skills/git-worktree-yolo/simulate.sh          # core sync/rewrite/skip/zero-diff   → 18 passed
+bash skills/git-worktree-yolo/test-global-hook.sh  # global core.hooksPath hook          → 12 passed
+bash skills/git-worktree-yolo/test-multistack.sh   # stack/IDE detection, manifest, bootstrap → 19 passed
+bash skills/git-worktree-yolo/test-secret-guard.sh # audit, pre-commit block, allow-list → 15 passed
 ```
 
-`simulate.sh` builds a throwaway repo, creates a worktree (which breaks), and asserts sync,
-boundary-aware path rewrite, binary-verbatim copy, heavy-dir skip, `.iml` exclusion, **zero git
-diff**, and idempotency. `test-global-hook.sh` proves the global hook install/chain/uninstall in
-a sandboxed `HOME`. `test-multistack.sh` proves stack/IDE detection, the report, recreate guidance,
-the `.worktree-yolo` manifest, and `--bootstrap`.
+`simulate.sh` asserts sync, boundary-aware path rewrite, binary-verbatim copy, heavy-dir skip,
+`.iml` exclusion, **zero git diff**, idempotency. `test-global-hook.sh` proves the global hook
+install/chain/uninstall in a sandboxed `HOME`. `test-multistack.sh` proves stack/IDE detection,
+the report, recreate guidance, the `.worktree-yolo` manifest, and `--bootstrap`. `test-secret-guard.sh`
+proves the secret audit, the pre-commit commit-block, the allow-list, and guard install/uninstall.
 
 ## How it works (internals)
 
