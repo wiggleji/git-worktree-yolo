@@ -3,9 +3,18 @@
 > **YOLO — You Only Load Once.** Enter a git worktree, run it once, and its environment is
 > healed. Re-runs are free no-ops, so it's safe to fire automatically on every agent/session start.
 
-A Claude Code **skill** (and standalone bash script) that makes a freshly-created `git worktree`
-actually runnable, compilable, and debuggable in your IDE — by mirroring the machine-local files
-that `git worktree add` leaves behind, **without ever touching a tracked file** (zero `git status` diff).
+**A cross-agent Agent Skill** for **Claude Code · OpenAI Codex · Google Antigravity** (and any
+tool that follows the [Agent Skills](https://agentskills.io) `SKILL.md` standard and
+[`AGENTS.md`](https://agents.md)). It makes a freshly-created `git worktree` actually runnable,
+compilable, and debuggable — by mirroring the machine-local files that `git worktree add` leaves
+behind, **without ever touching a tracked file** (zero `git status` diff).
+
+Built on open standards, so one install works everywhere:
+- **`SKILL.md` + `~/.agents/skills/`** — the shared skill spec read by Codex and Antigravity; Claude Code uses `~/.claude/skills/`.
+- **`AGENTS.md`** — the shared cross-agent instructions standard.
+- **git hooks** — the engine is a portable bash script + `post-checkout`/`pre-commit` hooks, so it works in **any** agent (or none) the moment git runs.
+
+➡️ Jump to **[Works across agents](#works-across-agents-claude-code--openai-codex--google-antigravity)** for per-agent setup.
 
 ## The problem
 
@@ -87,7 +96,9 @@ bypass a single commit with `git commit --no-verify`.
 
 ## Install (one line)
 
-Installs the skill + the `/worktree-yolo-hook` command into `~/.claude`.
+Auto-detects your agents and installs the skill to the shared **`~/.agents/skills/`** (OpenAI
+Codex + Google Antigravity) and to **`~/.claude/skills/`** (Claude Code), plus each agent's
+slash-command/workflow wrapper. Target one explicitly with `--agent claude|codex|antigravity|all`.
 
 **Default — skill only, no hook** (you trigger it, nothing touches your git config):
 
@@ -111,15 +122,17 @@ Re-running updates in place. Override the target with `CLAUDE_CONFIG_DIR=...`.
 
 <details><summary>Other install methods</summary>
 
-**Project skill (shared with your team, zero per-developer install)** — clone the `skills/`
-subtree into your repo and commit it:
+**Project skill (shared with your team, zero per-developer install)** — commit the skill into
+your repo at the standard project path so every agent auto-discovers it on clone:
 
 ```bash
 git clone --depth 1 https://github.com/wiggleji/git-worktree-yolo /tmp/wty
+# .agents/skills is the shared standard (Codex + Antigravity); .claude/skills for Claude Code
+cp -R /tmp/wty/skills/git-worktree-yolo .agents/skills/git-worktree-yolo
 cp -R /tmp/wty/skills/git-worktree-yolo .claude/skills/git-worktree-yolo
-cp /tmp/wty/commands/worktree-yolo-hook.md .claude/commands/
 ```
-Claude Code auto-discovers `.claude/skills/`, so anyone who clones the repo gets it.
+Then add an [`AGENTS.md`](AGENTS.md) (and one-line `CLAUDE.md`/`GEMINI.md` pointing to it) so
+every agent shares one source of truth.
 
 </details>
 
@@ -153,7 +166,9 @@ curl -fsSL …/install.sh | bash -s -- --agent codex        # or: claude | antig
 ## Usage
 
 ```bash
-S="$HOME/.claude/skills/git-worktree-yolo/git-worktree-yolo.sh"
+# the script lives wherever it was installed (same on every agent):
+S="$HOME/.agents/skills/git-worktree-yolo/git-worktree-yolo.sh"   # Codex / Antigravity
+# S="$HOME/.claude/skills/git-worktree-yolo/git-worktree-yolo.sh" # Claude Code
 
 bash "$S" --dry-run [WORKTREE_DIR]      # preview (do this first on a new repo)
 bash "$S" [WORKTREE_DIR]                # sync + report stack/IDE/next-steps + secret audit
