@@ -45,6 +45,7 @@ S="$HOME/.claude/skills/git-worktree-yolo/git-worktree-yolo.sh"
 bash "$S" --dry-run [WORKTREE_DIR]   # preview (do this first on a new repo)
 bash "$S" [WORKTREE_DIR]             # sync + report stack/IDE/next-steps — idempotent
 bash "$S" --bootstrap [WORKTREE_DIR] # also RUN the dep installs (npm ci / pod install / …)
+bash "$S" --check [--strict] [--json]# CI gate: fail if the repo has committable secrets
 bash "$S" --install-hook             # per-repo post-checkout hook (this repo only)
 bash "$S" --install-global-hook      # global hook: every repo on the machine self-heals
 bash "$S" --uninstall-global-hook    # turn the global hook off
@@ -138,6 +139,7 @@ bash "$D/test-multistack.sh"    # stack+IDE detection, report, manifest, --boots
 bash "$D/test-secret-guard.sh"  # secret audit, pre-commit block, allow-list → 15 passed
 bash "$D/test-advisory.sh"      # heads-up for issues it can't auto-fix → 5 passed
 bash "$D/test-concurrency.sh"   # atomic writes + per-worktree lock + parallel safety → 15 passed
+bash "$D/test-check.sh"         # --check CI gate: FAIL/WARN/strict/json → 14 passed
 ```
 
 Concurrency-safe by design: each file is written to a temp and atomically renamed (no

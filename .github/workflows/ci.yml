@@ -38,7 +38,7 @@ jobs:
         run: |
           set -e
           fail=0
-          for t in simulate test-global-hook test-multistack test-secret-guard test-advisory test-concurrency; do
+          for t in simulate test-global-hook test-multistack test-secret-guard test-advisory test-concurrency test-check; do
             echo "::group::$t ($BASH_BIN)"
             "$BASH_BIN" "skills/git-worktree-yolo/$t.sh" || fail=1
             echo "::endgroup::"

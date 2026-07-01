@@ -85,6 +85,7 @@ bash "$S" --dry-run [WORKTREE_DIR]      # preview (do this first on a new repo)
 bash "$S" [WORKTREE_DIR]                # sync + report stack/IDE/next-steps + secret audit
 bash "$S" --bootstrap [WORKTREE_DIR]    # also RUN the dep installs (npm ci / pod install / …)
 bash "$S" --audit [WORKTREE_DIR]        # scan for committable secrets (exit 1 if any tracked)
+bash "$S" --check [--strict] [--json]   # CI gate: worktree-readiness / no leaks (exit 1 on fail)
 bash "$S" --install-hook                # per-repo: post-checkout sync + pre-commit secret guard
 bash "$S" --install-global-hook         # global: sync + secret guard for every repo
 bash "$S" --uninstall-global-hook       # turn the global hooks back off
@@ -221,6 +222,26 @@ curl -fsSL …/install.sh | bash -s -- --agent codex        # or: claude | antig
 - **Per-repo or committed Claude Code hooks** — see **[automation.md](skills/git-worktree-yolo/automation.md)**
   for `post-checkout` and `SessionStart`/`SubagentStart` recipes.
 
+## CI gate (`--check`)
+
+`--check` is a CI-agnostic leak/readiness gate — it exits non-zero when a repo has committable
+secrets, so it drops into any pipeline. It **FAILs** on secrets already tracked by git or a
+working-tree secret that isn't gitignored; it **WARNs** (exit 0) when `.gitignore` misses `.env`
+or a tracked file hardcodes an absolute home path. `--strict` promotes warnings to failures;
+`--json` emits `{"ok":…,"failures":[…],"warnings":[…]}`.
+
+**AWS CodeBuild** (`buildspec.yml`):
+
+```yaml
+phases:
+  build:
+    commands:
+      - curl -fsSL https://raw.githubusercontent.com/wiggleji/git-worktree-yolo/main/install.sh | bash
+      - bash ~/.agents/skills/git-worktree-yolo/git-worktree-yolo.sh --check --strict
+```
+
+**GitHub Actions:** `- run: bash …/git-worktree-yolo.sh --check --strict` after checkout.
+
 ## Tuning
 
 The skip-list and size cap are arrays at the top of `skills/git-worktree-yolo/git-worktree-yolo.sh`.
@@ -228,7 +249,7 @@ Add project-specific dirs there, or override the cap: `WTSYNC_MAX_BYTES=2097152 
 
 ## Proof / tests
 
-Six isolated harnesses (they never touch your real repos or `~/.gitconfig`) — **84 assertions**,
+Seven isolated harnesses (they never touch your real repos or `~/.gitconfig`) — **98 assertions**,
 run in [CI](.github/workflows/ci.yml) on Linux (bash 5.x) and macOS (bash 3.2) plus `shellcheck`:
 
 ```bash
@@ -238,6 +259,7 @@ bash skills/git-worktree-yolo/test-multistack.sh   # stack/IDE detection, manife
 bash skills/git-worktree-yolo/test-secret-guard.sh # audit, pre-commit block, allow-list → 15 passed
 bash skills/git-worktree-yolo/test-advisory.sh     # heads-up for unfixable issues       →  5 passed
 bash skills/git-worktree-yolo/test-concurrency.sh  # atomic writes, lock, parallel safety → 15 passed
+bash skills/git-worktree-yolo/test-check.sh        # --check CI gate (FAIL/WARN/strict/json) → 14 passed
 ```
 
 `simulate.sh` asserts sync, boundary-aware path rewrite, binary-verbatim copy, heavy-dir skip,

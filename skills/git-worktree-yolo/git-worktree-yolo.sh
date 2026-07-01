@@ -21,6 +21,7 @@
 #   git-worktree-yolo.sh --dry-run [TARGET_DIR]# preview only
 #   git-worktree-yolo.sh --bootstrap [TARGET_DIR] # also RUN the dep install commands
 #   git-worktree-yolo.sh --audit [TARGET_DIR]  # scan for committable secrets (exit 1 if any tracked)
+#   git-worktree-yolo.sh --check [--strict] [--json] [DIR]  # CI gate: worktree-readiness / no leaks
 #   git-worktree-yolo.sh --quiet [TARGET_DIR]  # silent unless something is synced (for hooks)
 #   git-worktree-yolo.sh --install-hook        # per-repo hooks (post-checkout sync + pre-commit guard)
 #   git-worktree-yolo.sh --install-global-hook # GLOBAL hooks (all repos): sync + secret-commit guard
@@ -90,6 +91,8 @@ CONFIG_ALLOW=()     # globs explicitly allowed to be committed (override secret 
 DRY_RUN=0
 QUIET=0
 BOOTSTRAP=0
+STRICT=0
+JSON=0
 ACTION="sync"
 TARGET_ARG=""
 
@@ -101,9 +104,12 @@ while [[ $# -gt 0 ]]; do
     --install-guard)         ACTION="install-guard" ;;
     --uninstall-guard)       ACTION="uninstall-guard" ;;
     --audit)                 ACTION="audit" ;;
+    --check)                 ACTION="check" ;;             # CI: worktree-readiness gate
     --pre-commit-guard)      ACTION="pre-commit-guard" ;;   # internal: invoked by the hook
     --dry-run)               DRY_RUN=1 ;;
     --bootstrap)             BOOTSTRAP=1 ;;
+    --strict)                STRICT=1 ;;                    # --check: promote warnings to failures
+    --json)                  JSON=1 ;;                      # --check: machine-readable output
     --quiet|-q)              QUIET=1 ;;
     -h|--help)               grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)                       TARGET_ARG="$1" ;;
@@ -567,6 +573,51 @@ do_audit() {
   if [[ "$n" -eq 0 ]]; then info "✓ no committed secrets detected."; else exit 1; fi
 }
 
+# --- CI gate: worktree-readiness / leak check ----------------------------------
+# Agent- and CI-agnostic (drop into a CodeBuild buildspec, GitHub Actions, etc.).
+# Exit 0 = ready; exit 1 = a FAIL (or a WARN under --strict). Use --json for machines.
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+do_check() {
+  resolve_worktrees; load_config
+  local fails=() warns=() rel p hp
+  # FAIL: secrets already tracked by git (a leak in the repo/history)
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] && is_secret "$rel" && fails+=("secret is tracked by git: $rel")
+  done < <(git -C "$TARGET" ls-files 2>/dev/null)
+  # FAIL: secret in the working tree that is neither tracked nor gitignored (git add -A traps it)
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] && is_secret "$rel" && fails+=("secret not gitignored (a 'git add -A' would stage it): $rel")
+  done < <(git -C "$TARGET" ls-files --others --exclude-standard 2>/dev/null)
+  # WARN: common secret filenames not covered by .gitignore (proactive, even if absent)
+  for p in .env .env.local; do
+    git -C "$TARGET" check-ignore -q "$p" 2>/dev/null || warns+=("'.gitignore' does not cover '$p'")
+  done
+  # WARN: tracked text files hardcoding an absolute home path (breaks worktrees / CI / other machines)
+  hp="$(git -C "$TARGET" grep -lIE '/(Users|home)/[A-Za-z0-9._-]+/' -- . 2>/dev/null | head -5 || true)"
+  [[ -n "$hp" ]] && while IFS= read -r rel; do
+    [[ -n "$rel" ]] && warns+=("tracked file hardcodes an absolute home path: $rel")
+  done <<< "$hp"
+  # --strict promotes warnings to failures
+  [[ "$STRICT" == 1 && "${#warns[@]}" -gt 0 ]] && { fails+=(${warns[@]+"${warns[@]}"}); warns=(); }
+
+  local i first
+  if [[ "$JSON" == 1 ]]; then
+    printf '{"ok":%s,"target":"%s","failures":[' "$([[ "${#fails[@]}" -eq 0 ]] && echo true || echo false)" "$(json_escape "$TARGET")"
+    first=1; for i in ${fails[@]+"${fails[@]}"}; do [[ "$first" == 1 ]] || printf ','; printf '"%s"' "$(json_escape "$i")"; first=0; done
+    printf '],"warnings":['
+    first=1; for i in ${warns[@]+"${warns[@]}"}; do [[ "$first" == 1 ]] || printf ','; printf '"%s"' "$(json_escape "$i")"; first=0; done
+    printf ']}\n'
+  else
+    info "worktree-readiness check · $(basename "$TARGET")"
+    for i in ${fails[@]+"${fails[@]}"}; do crit "FAIL: $i"; done
+    for i in ${warns[@]+"${warns[@]}"}; do warn "$i"; done
+    [[ "${#fails[@]}" -eq 0 ]] && info "✓ ready — no committable secrets${STRICT:+ (strict)}" \
+                               || crit "${#fails[@]} blocking issue(s) — see above."
+  fi
+  # explicit exit so the code survives the EXIT trap (matches --audit / --pre-commit-guard)
+  [[ "${#fails[@]}" -eq 0 ]] && exit 0 || exit 1
+}
+
 # --- shared hook helpers --------------------------------------------------------
 MARKER="# >>> git-worktree-yolo managed hook >>>"
 preserve_existing() {   # move a pre-existing, non-managed hook aside so we can chain it
@@ -696,6 +747,7 @@ case "$ACTION" in
   install-guard)         install_guard ;;
   uninstall-guard)       uninstall_guard ;;
   audit)                 do_audit ;;
+  check)                 do_check ;;
   pre-commit-guard)      pre_commit_guard ;;
   sync)                  do_sync ;;
 esac
